@@ -1,0 +1,64 @@
+# Files4Me
+
+Files4Me is a portable, native Windows dual-pane file manager. It combines Total Commander-style keyboard operations with a compact File Explorer-style interface.
+
+The interface includes a native File/Edit/View/Help navigation row, rounded borderless controls, a DPI-scaled Material Icons command bar, one icon-only light/dark toggle, and a dual-pane toggle. File columns use compact square headers. A File Explorer-style sidebar provides Home, known folders, Recycle Bin, drives, Network, and Linux/WSL shortcuts.
+
+The native Settings page covers startup, appearance, file display, operations, navigation/refresh, sidebar shortcuts, and advanced shell behavior. Changes apply immediately and persist in the portable INI file.
+
+File mutations run through a background operation center instead of blocking the interface. Up to three jobs may run when they touch independent volumes or network shares; jobs sharing a root remain ordered. The bottom drawer shows progress and recent history, supports safe item-boundary pause, cancellation, retry, and conflict policies, and records interrupted work for explicit recovery after restart.
+
+## Requirements
+
+- Windows 10 or Windows 11 x64
+- Visual Studio 2026 Build Tools
+- Desktop development with C++ workload
+- Windows 10/11 SDK
+
+## Build
+
+Open `Files4Me.sln` in Visual Studio and build `Release | x64`, or run from a Visual Studio Developer PowerShell:
+
+```powershell
+msbuild Files4Me.sln /m /p:Configuration=Release /p:Platform=x64
+```
+
+Output: `dist/Files4Me.exe`
+
+Files4Me uses only Windows system APIs. It stores `Files4Me.ini` and the versioned `Files4Me.jobs` operation journal beside the executable when writable, otherwise under `%LocalAppData%\Files4Me`.
+
+## Installer
+
+Run `powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1` with Inno Setup 6 installed. The installer performs a per-user installation under `%LocalAppData%\Programs\Files4Me`, creates a Start Menu shortcut, and registers reversible **Open in Files4Me** commands for folders, folder backgrounds, and drives. An optional installer task makes Files4Me the default handler when folders and drives are opened; uninstall restores the previous handler if Files4Me still owns it.
+
+Installed builds keep preferences and the operation journal under `%LocalAppData%\Files4Me`, separate from program files.
+
+## License
+
+Files4Me is licensed under the [MIT License](LICENSE). Google Material Icons remain available under the Apache License 2.0; see `assets/MATERIAL-ICONS-LICENSE.txt`.
+
+Google Material Icons are embedded in the executable for offline use and distributed under Apache License 2.0. The license copy is at `assets/MATERIAL-ICONS-LICENSE.txt`.
+
+Selected files support native Windows OLE drag-and-drop to the other pane, folders, Explorer, the desktop, and compatible applications. Right-click uses the full Windows Shell context menu, including installed shell extensions.
+
+Downloads uses an Explorer-style date timeline (Today, Yesterday, this week, and older groups). ZIP files open as read-only folders using Windows' built-in compressed-folder handler; files can be opened, copied, dragged out, or extracted without bundling an archive library. Checkbox space is reserved in Details view so names never overlap selection controls.
+
+The archive smoke test in `tests/archive_smoke.cpp` verifies real Windows ZIP enumeration and extraction against a generated fixture.
+
+## Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| Tab | Switch active pane |
+| Enter | Open selected item |
+| Insert | Toggle selected item |
+| F2 | Rename |
+| F5 | Copy to other pane |
+| F6 | Move to other pane |
+| F7 | Create folder |
+| F8 / Delete | Move to Recycle Bin |
+| Shift+Delete | Permanently delete |
+| Ctrl+T / Ctrl+W | New / close tab |
+| Ctrl+L | Focus path |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste through Windows clipboard |
+| Alt+Left / Alt+Right / Alt+Up | Back / forward / parent |

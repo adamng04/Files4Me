@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{A923846A-F31A-4A62-BCC8-80B76CA55AC8}</ProjectGuid>
+    <RootNamespace>Files4Me</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><WholeProgramOptimization>true</WholeProgramOptimization><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(SolutionDir)dist\</OutDir><IntDir>$(SolutionDir)build\$(Configuration)\</IntDir><TargetName>Files4Me</TargetName><TrackFileAccess>false</TrackFileAccess>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel><SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode><LanguageStandard>stdcpp20</LanguageStandard>
+      <MinimalRebuildFromTracking>false</MinimalRebuildFromTracking>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/permissive- /utf-8 /guard:cf /Qspectre %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <MinimalRebuildFromTracking>false</MinimalRebuildFromTracking>
+      <SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation><DataExecutionPrevention>true</DataExecutionPrevention><RandomizedBaseAddress>true</RandomizedBaseAddress><HighEntropyVA>true</HighEntropyVA><ControlFlowGuard>Guard</ControlFlowGuard>
+      <AdditionalDependencies>User32.lib;Gdi32.lib;Comctl32.lib;Shell32.lib;Shlwapi.lib;Ole32.lib;Dwmapi.lib;UxTheme.lib;Propsys.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ManifestFile>app.manifest</ManifestFile>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\archive.cpp" />
+    <ClCompile Include="src\main.cpp" />
+  </ItemGroup>
+  <ItemGroup><ClInclude Include="src\archive.h" /></ItemGroup>
+  <ItemGroup><ResourceCompile Include="src\Files4Me.rc" /></ItemGroup>
+  <ItemGroup><Manifest Include="app.manifest" /></ItemGroup>
+  <ItemGroup>
+    <None Include="assets\MaterialIcons-Regular.ttf" />
+    <None Include="assets\MATERIAL-ICONS-LICENSE.txt" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

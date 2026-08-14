@@ -1,0 +1,37 @@
+#include "resource.h"
+
+IDR_VERSION VERSIONINFO
+ FILEVERSION 0,3,0,0
+ PRODUCTVERSION 0,3,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "adamng04 and Files4Me contributors"
+            VALUE "FileDescription", "Files4Me native file manager"
+            VALUE "FileVersion", "0.3-alpha"
+            VALUE "InternalName", "Files4Me"
+            VALUE "LegalCopyright", "Copyright (c) 2026 adamng04 and Files4Me contributors"
+            VALUE "OriginalFilename", "Files4Me.exe"
+            VALUE "ProductName", "Files4Me"
+            VALUE "ProductVersion", "0.3-alpha"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+IDI_APP_ICON ICON "..\\assets\\Files4Me.ico"
+IDR_MATERIAL_ICONS RCDATA "..\\assets\\MaterialIcons-Regular.ttf"

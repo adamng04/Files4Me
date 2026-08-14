@@ -1,0 +1,15 @@
+.vs/
+.codex/
+build/
+dist/
+*.user
+*.suo
+*.obj
+*.aps
+*.jobs
+*.pdb
+*.ipdb
+*.iobj
+*.exe
+Files4Me.ini
+UpgradeLog.htm
