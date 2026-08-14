@@ -1,5 +1,10 @@
 #define AppName "Files4Me"
-#define AppVersion "0.3-alpha"
+#ifndef AppVersion
+#define AppVersion "0.4-alpha"
+#endif
+#ifndef AppNumericVersion
+#define AppNumericVersion "0.4.0.0"
+#endif
 #define AppExeName "Files4Me.exe"
 
 [Setup]
@@ -8,8 +13,8 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=adamng04 and Files4Me contributors
 AppCopyright=Copyright (c) 2026 adamng04 and Files4Me contributors
-VersionInfoVersion=0.3.0.0
-VersionInfoDescription=Files4Me 0.3-alpha installer
+VersionInfoVersion={#AppNumericVersion}
+VersionInfoDescription=Files4Me {#AppVersion} installer
 DefaultDirName={localappdata}\Programs\Files4Me
 DefaultGroupName=Files4Me
 DisableProgramGroupPage=yes
@@ -20,9 +25,9 @@ MinVersion=10.0.17763
 LicenseFile=..\LICENSE
 SetupIconFile=..\assets\Files4Me.ico
 UninstallDisplayIcon={app}\{#AppExeName}
-UninstallDisplayName=Files4Me 0.3-alpha
+UninstallDisplayName=Files4Me {#AppVersion}
 OutputDir=..\dist\installer
-OutputBaseFilename=Files4Me-0.3-alpha-Setup
+OutputBaseFilename=Files4Me-{#AppVersion}-Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern dynamic

@@ -71,7 +71,7 @@ bool ParseHttpsUrl(const std::wstring& url, std::wstring& host, std::wstring& pa
 }
 
 bool HttpGet(const std::wstring& initialUrl, DWORD maximumBytes, std::vector<BYTE>& output, std::wstring& detail) {
-    InternetHandle session(WinHttpOpen(L"Files4Me/0.3-alpha update checker", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    InternetHandle session(WinHttpOpen(L"Files4Me/" FILES4ME_VERSION_DISPLAY_W L" update checker", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session) { detail = L"WinHTTP initialization failed"; return false; }
     WinHttpSetTimeouts(session.get(), 5000, 5000, 10000, 15000);

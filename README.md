@@ -2,7 +2,7 @@
 
 Files4Me is a portable, native Windows dual-pane file manager. It combines Total Commander-style keyboard operations with a compact File Explorer-style interface.
 
-The interface includes a native File/Edit/View/Help navigation row, rounded borderless controls, a DPI-scaled Material Icons command bar, one icon-only light/dark toggle, and a dual-pane toggle. File columns use compact square headers. A File Explorer-style sidebar provides Home, known folders, Recycle Bin, drives, Network, and Linux/WSL shortcuts.
+The interface includes a native File/Edit/View/Help navigation row, rounded borderless controls, a DPI-scaled Material Icons command bar, one icon-only light/dark toggle, and a dual-pane toggle. File columns use compact square headers. A File Explorer-style sidebar provides Home, known folders, Recycle Bin, drives, Network, Linux/WSL shortcuts, and persistent user-pinned folders. Each pane has a live current-location filter that matches names, extensions, and file types without blocking enumeration.
 
 The native Settings page covers startup, appearance, file display, operations, navigation/refresh, sidebar shortcuts, and advanced shell behavior. Changes apply immediately and persist in the portable INI file.
 
@@ -24,6 +24,8 @@ msbuild Files4Me.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
 Output: `dist/Files4Me.exe`
+
+Release identity is defined once in `src/version.h`; the executable, Windows version resource, updater comparison, and installer build consume it.
 
 Files4Me uses only Windows system APIs. It stores `Files4Me.ini` and the versioned `Files4Me.jobs` operation journal beside the executable when writable, otherwise under `%LocalAppData%\Files4Me`.
 
@@ -78,5 +80,6 @@ The archive smoke test in `tests/archive_smoke.cpp` verifies real Windows ZIP en
 | Shift+Delete | Permanently delete |
 | Ctrl+T / Ctrl+W | New / close tab |
 | Ctrl+L | Focus path |
+| Ctrl+F | Focus current-pane filter |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste through Windows clipboard |
 | Alt+Left / Alt+Right / Alt+Up | Back / forward / parent |

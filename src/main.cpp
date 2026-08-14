@@ -59,13 +59,13 @@ enum CommandId : UINT {
     ID_BACK = 100, ID_FORWARD, ID_UP, ID_REFRESH, ID_NEW_FOLDER,
     ID_LIGHT, ID_DARK, ID_DUAL, ID_SWITCH_PANE,
     ID_OPEN, ID_RENAME, ID_COPY, ID_MOVE, ID_DELETE, ID_DELETE_PERMANENT,
-    ID_NEW_TAB, ID_CLOSE_TAB, ID_FOCUS_PATH, ID_SELECT_ALL, ID_CLIP_COPY, ID_CLIP_CUT, ID_CLIP_PASTE,
+    ID_NEW_TAB, ID_CLOSE_TAB, ID_FOCUS_PATH, ID_FOCUS_SEARCH, ID_SELECT_ALL, ID_CLIP_COPY, ID_CLIP_CUT, ID_CLIP_PASTE,
     ID_MENU_FILE, ID_MENU_EDIT, ID_MENU_VIEW, ID_MENU_HELP, ID_EXIT, ID_ABOUT, ID_SHORTCUTS, ID_CHECK_UPDATES,
     ID_SETTINGS, ID_THEME_TOGGLE, ID_VIEW_LAYOUT, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_JOB_CLEAR,
     ID_MORE, ID_OPEN_WITH, ID_COPY_PATH, ID_PROPERTIES, ID_SHELL_CONTEXT, ID_EXTRACT_ALL = 0x9001,
     ID_CREATE_FOLDER = 0x9002, ID_CREATE_TEXT = 0x9003,
     ID_SORT_NAME = 0x9010, ID_SORT_EXTENSION, ID_SORT_SIZE, ID_SORT_MODIFIED,
-    ID_FOLDER_PROPERTIES = 0x9014,
+    ID_FOLDER_PROPERTIES = 0x9014, ID_PIN_SIDEBAR, ID_UNPIN_SIDEBAR,
     ID_NEW_TEMPLATE_BASE = 0xA100, ID_NEW_TEMPLATE_LAST = 0xA1FF,
     ID_RECYCLE_RESTORE = 180, ID_RECYCLE_RESTORE_ALL, ID_RECYCLE_EMPTY, ID_SIDEBAR = 300,
     ID_VIEW_EXTRA_LARGE = 320, ID_VIEW_LARGE, ID_VIEW_MEDIUM, ID_VIEW_SMALL,
@@ -73,7 +73,7 @@ enum CommandId : UINT {
     ID_DRIVE_BASE = 400,
     ID_PANE_BASE = 1000,
     ID_PANE_STRIDE = 100,
-    ID_TAB = 1, ID_DRIVES = 2, ID_PATH = 3,
+    ID_TAB = 1, ID_DRIVES = 2, ID_PATH = 3, ID_SEARCH = 4,
     ID_HEADER_NAME = 10, ID_HEADER_EXT = 11, ID_HEADER_SIZE = 12, ID_HEADER_DATE = 13,
     ID_LIST = 20, ID_STATUS = 21,
     ID_SETTINGS_CATEGORY_BASE = 5000,
@@ -177,6 +177,7 @@ struct SidebarItem {
     std::wstring target;
     SidebarAction action = SidebarAction::Navigate;
     int icon = -1;
+    bool pinned = false;
 };
 
 struct SettingsControl {
@@ -271,13 +272,16 @@ struct Pane {
     HWND tab = nullptr;
     HWND drives = nullptr;
     HWND path = nullptr;
+    HWND search = nullptr;
     std::array<HWND, 4> headers{};
     HWND list = nullptr;
     HWND status = nullptr;
     IDropTarget* dropTarget = nullptr;
     std::vector<TabState> tabs;
     std::vector<FileItem> items;
+    std::vector<FileItem> sourceItems;
     std::vector<FileItem> timelineItems;
+    std::wstring filterText;
     std::array<bool, 8> collapsedTimelineGroups{};
     bool timeline = false;
     std::wstring archivePath;
@@ -357,6 +361,8 @@ struct AppState {
     HWND layoutCaption = nullptr;
     HWND sidebar = nullptr;
     std::vector<SidebarItem> sidebarItems;
+    std::vector<std::wstring> pinnedFolders;
+    std::wstring pendingSidebarTarget;
     Preferences preferences;
     HWND settingsWindow = nullptr;
     int settingsCategory = 0;
@@ -408,6 +414,7 @@ void LayoutWindow();
 void ApplyTheme();
 void RebuildCheckboxImages();
 void RebuildSidebarIconCache();
+void ApplyPaneFilter(int paneIndex, bool preserveSelection = true);
 int CachedSidebarIconIndex(int systemIndex);
 void RefreshAll();
 void SaveSettings();
@@ -800,11 +807,21 @@ int IconForShellName(const wchar_t* parsingName) {
     return result ? info.iIcon : 0;
 }
 
-void AddSidebarItem(const std::wstring& label, const std::wstring& target, SidebarAction action, int icon) {
-    g_app.sidebarItems.push_back({label, target, action, icon});
+void AddSidebarItem(const std::wstring& label, const std::wstring& target, SidebarAction action, int icon, bool pinned = false) {
+    g_app.sidebarItems.push_back({label, target, action, icon, pinned});
 }
 
 void AddSidebarSeparator() { AddSidebarItem(L"", L"", SidebarAction::Separator, -1); }
+
+bool SamePath(const std::wstring& left, const std::wstring& right) {
+    return _wcsicmp(left.c_str(), right.c_str()) == 0;
+}
+
+bool IsPinnedFolder(const std::wstring& path) {
+    return std::any_of(g_app.pinnedFolders.begin(), g_app.pinnedFolders.end(), [&](const std::wstring& pinned) {
+        return SamePath(pinned, path);
+    });
+}
 
 void RebuildSidebar() {
     if (!g_app.sidebar) return;
@@ -833,6 +850,13 @@ void RebuildSidebar() {
     if (g_app.preferences.sidebarRecycleBin) {
         AddSidebarItem(L"Recycle Bin", kRecycleLocation, SidebarAction::Navigate,
                        IconForShellName(L"::{645FF040-5081-101B-9F08-00AA002F954E}"));
+    }
+    for (const std::wstring& pinned : g_app.pinnedFolders) {
+        const DWORD attributes = GetFileAttributesW(ExtendedPath(pinned).c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+        std::wstring label = PathFindFileNameW(pinned.c_str());
+        if (label.empty()) label = pinned;
+        AddSidebarItem(label, pinned, SidebarAction::Navigate, IconFor(pinned, FILE_ATTRIBUTE_DIRECTORY), true);
     }
     AddSidebarSeparator();
     AddSidebarItem(L"This PC", kThisPcLocation, SidebarAction::Navigate,
@@ -940,7 +964,11 @@ const wchar_t* TimelineBucketName(int bucket) {
 
 void RebuildTimelineRows(Pane& pane, const std::vector<std::wstring>& selectedPaths = {}) {
     std::array<std::vector<FileItem>, 8> groups;
-    for (FileItem item : pane.timelineItems) groups[TimelineBucketFor(item.modified)].push_back(std::move(item));
+    for (FileItem item : pane.timelineItems) {
+        if (!pane.filterText.empty() && !StrStrIW(item.name.c_str(), pane.filterText.c_str()) &&
+            !StrStrIW(item.extension.c_str(), pane.filterText.c_str()) && !StrStrIW(item.type.c_str(), pane.filterText.c_str())) continue;
+        groups[TimelineBucketFor(item.modified)].push_back(std::move(item));
+    }
     const bool reverseGroups = pane.sort == SortColumn::Modified && pane.ascending;
     pane.items.clear();
     for (int step = 0; step < 8; ++step) {
@@ -1077,7 +1105,7 @@ void StartDriveOverview(int paneIndex) {
     pane.hoveredCheckboxItem = -1;
     pane.mode = PaneMode::DriveOverview;
     pane.timeline = false; pane.timelineItems.clear(); pane.archivePath.clear(); pane.archiveInternalPath.clear();
-    pane.items.clear(); pane.recycleItems.clear(); pane.driveItems.clear();
+    pane.items.clear(); pane.sourceItems.clear(); pane.recycleItems.clear(); pane.driveItems.clear();
     const uint64_t generation = ++pane.generation;
     pane.enumerating = true;
     SetWindowTheme(pane.list, L"", L"");
@@ -1117,7 +1145,7 @@ void LoadRecycleBin(int paneIndex) {
     pane.hoveredCheckboxItem = -1;
     ++pane.generation; pane.enumerating = false; pane.mode = PaneMode::RecycleBin;
     pane.timeline = false; pane.timelineItems.clear(); pane.archivePath.clear(); pane.archiveInternalPath.clear();
-    pane.items.clear(); pane.driveItems.clear(); pane.recycleItems.clear();
+    pane.items.clear(); pane.sourceItems.clear(); pane.driveItems.clear(); pane.recycleItems.clear();
     const bool dark = g_app.theme == ThemeMode::Dark && !IsHighContrast();
     SetWindowTheme(pane.list, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
     ComPtr<IShellFolder> desktop, folder;
@@ -1191,10 +1219,12 @@ void Navigate(int paneIndex, const std::wstring& requested, bool addHistory) {
         tab.forward.clear();
     }
     tab.path = path;
+    pane.filterText.clear();
+    if (pane.search) SetWindowTextW(pane.search, L"");
     SetWindowTextW(pane.path, DisplayNameForPath(path).c_str());
     UpdateTabText(paneIndex);
     if (archiveLocation) {
-        pane.mode = PaneMode::Archive; pane.view = FileViewMode::Details; pane.timeline = false; pane.timelineItems.clear();
+        pane.mode = PaneMode::Archive; pane.view = FileViewMode::Details; pane.timeline = false; pane.timelineItems.clear(); pane.sourceItems.clear();
         pane.archivePath = archivePath; pane.archiveInternalPath = archiveInternalPath;
         SendMessageW(pane.path, EM_SETREADONLY, TRUE, 0);
         SetWindowTextW(pane.path, DisplayNameForPath(path).c_str());
@@ -1230,7 +1260,7 @@ void Navigate(int paneIndex, const std::wstring& requested, bool addHistory) {
         const bool enteringTimeline = forcedDownloadsTimeline || IsDownloadsPath(path);
         if (enteringTimeline && !pane.timeline) { pane.sort = SortColumn::Modified; pane.ascending = false; pane.view = FileViewMode::Details; }
         pane.timeline = enteringTimeline;
-        pane.timelineItems.clear(); pane.archivePath.clear(); pane.archiveInternalPath.clear();
+        pane.timelineItems.clear(); pane.sourceItems.clear(); pane.archivePath.clear(); pane.archiveInternalPath.clear();
         const bool dark = g_app.theme == ThemeMode::Dark && !IsHighContrast();
         SetWindowTheme(pane.list, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
         if (paneIndex == g_app.activePane) {
@@ -1368,6 +1398,37 @@ std::vector<std::wstring> SelectedPaths(int paneIndex) {
             !pane.items[index].fullPath.empty()) paths.push_back(pane.items[index].fullPath);
     }
     return paths;
+}
+
+void ApplyPaneFilter(int paneIndex, bool preserveSelection) {
+    Pane& pane = g_app.panes[paneIndex];
+    const std::vector<std::wstring> selected = preserveSelection ? SelectedPaths(paneIndex) : std::vector<std::wstring>{};
+    if (pane.timeline) {
+        RebuildTimelineRows(pane, selected);
+    } else if (pane.mode == PaneMode::Filesystem || pane.mode == PaneMode::Archive) {
+        pane.items.clear();
+        for (const FileItem& item : pane.sourceItems) {
+            if (pane.filterText.empty() || StrStrIW(item.name.c_str(), pane.filterText.c_str()) ||
+                StrStrIW(item.extension.c_str(), pane.filterText.c_str()) || StrStrIW(item.type.c_str(), pane.filterText.c_str()))
+                pane.items.push_back(item);
+        }
+        ListView_SetItemCountEx(pane.list, static_cast<int>(pane.items.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+        for (int row = 0; row < static_cast<int>(pane.items.size()); ++row) {
+            if (std::any_of(selected.begin(), selected.end(), [&](const std::wstring& path) { return SamePath(path, pane.items[row].fullPath); }))
+                ListView_SetItemState(pane.list, row, LVIS_SELECTED, LVIS_SELECTED);
+        }
+        InvalidateRect(pane.list, nullptr, FALSE);
+    } else {
+        return;
+    }
+    const size_t total = pane.timeline ? pane.timelineItems.size() : pane.sourceItems.size();
+    size_t visible = 0;
+    for (const FileItem& item : pane.items) if (item.IsActionable()) ++visible;
+    const std::wstring status = pane.filterText.empty()
+        ? std::to_wstring(total) + L" items"
+        : std::to_wstring(visible) + L" of " + std::to_wstring(total) + L" items";
+    SetWindowTextW(pane.status, status.c_str());
+    if (paneIndex == g_app.activePane) UpdateSelectionCommands();
 }
 
 bool IsZipFilePath(const std::wstring& path) {
@@ -2975,8 +3036,10 @@ void LayoutPane(int paneIndex, RECT bounds) {
     int width = bounds.right - bounds.left - pad * 2;
     ShowWindow(pane.tab, SW_HIDE);
     const int driveWidth = Scale(74);
+    const int searchWidth = (std::min)(Scale(230), (std::max)(Scale(130), width / 3));
     MoveWindow(pane.drives, x, y, driveWidth, rowHeight, TRUE);
-    MoveWindow(pane.path, x + driveWidth + gap, y, width - driveWidth - gap, rowHeight, TRUE); y += rowHeight + gap;
+    MoveWindow(pane.path, x + driveWidth + gap, y, width - driveWidth - searchWidth - gap * 2, rowHeight, TRUE);
+    MoveWindow(pane.search, x + width - searchWidth, y, searchWidth, rowHeight, TRUE); y += rowHeight + gap;
     const bool details = pane.mode == PaneMode::RecycleBin || pane.mode == PaneMode::Archive ||
                          (pane.mode == PaneMode::Filesystem && pane.view == FileViewMode::Details);
     EnsureColumnWidths(pane, width);
@@ -3124,14 +3187,14 @@ void LayoutWindow() {
     if (!g_app.dualPane) {
         LayoutPane(g_app.activePane, content);
         Pane& visible = g_app.panes[g_app.activePane];
-        ShowWindow(visible.tab, SW_HIDE); ShowWindow(visible.drives, SW_SHOW); ShowWindow(visible.path, SW_SHOW);
+        ShowWindow(visible.tab, SW_HIDE); ShowWindow(visible.drives, SW_SHOW); ShowWindow(visible.path, SW_SHOW); ShowWindow(visible.search, SW_SHOW);
         const bool details = visible.mode == PaneMode::RecycleBin ||
                              (visible.mode == PaneMode::Filesystem && visible.view == FileViewMode::Details);
         for (HWND header : visible.headers) ShowWindow(header, details ? SW_SHOW : SW_HIDE);
         ShowWindow(visible.list, SW_SHOW); ShowWindow(visible.status, SW_SHOW);
         for (int i = 0; i < 2; ++i) if (i != g_app.activePane) {
             Pane& pane = g_app.panes[i];
-            ShowWindow(pane.tab, SW_HIDE); ShowWindow(pane.drives, SW_HIDE); ShowWindow(pane.path, SW_HIDE);
+            ShowWindow(pane.tab, SW_HIDE); ShowWindow(pane.drives, SW_HIDE); ShowWindow(pane.path, SW_HIDE); ShowWindow(pane.search, SW_HIDE);
             for (HWND header : pane.headers) ShowWindow(header, SW_HIDE);
             ShowWindow(pane.list, SW_HIDE); ShowWindow(pane.status, SW_HIDE);
         }
@@ -3140,7 +3203,7 @@ void LayoutWindow() {
         LayoutPane(0, {content.left, content.top, content.left + half, content.bottom});
         LayoutPane(1, {content.left + half + gap, content.top, content.right, content.bottom});
         for (Pane& pane : g_app.panes) {
-            ShowWindow(pane.tab, SW_HIDE); ShowWindow(pane.drives, SW_SHOW); ShowWindow(pane.path, SW_SHOW);
+            ShowWindow(pane.tab, SW_HIDE); ShowWindow(pane.drives, SW_SHOW); ShowWindow(pane.path, SW_SHOW); ShowWindow(pane.search, SW_SHOW);
             const bool details = pane.mode == PaneMode::RecycleBin ||
                                  (pane.mode == PaneMode::Filesystem && pane.view == FileViewMode::Details);
             for (HWND header : pane.headers) ShowWindow(header, details ? SW_SHOW : SW_HIDE);
@@ -3216,10 +3279,11 @@ void ApplyTheme() {
         SetWindowTheme(pane.list, pane.mode == PaneMode::DriveOverview ? L"" : (dark ? L"DarkMode_Explorer" : L"Explorer"),
                        pane.mode == PaneMode::DriveOverview ? L"" : nullptr);
         SetWindowTheme(pane.path, dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
+        SetWindowTheme(pane.search, dark ? L"DarkMode_CFD" : L"Explorer", nullptr);
         ListView_SetBkColor(pane.list, g_app.colors.surface);
         ListView_SetTextBkColor(pane.list, g_app.colors.surface);
         ListView_SetTextColor(pane.list, g_app.colors.text);
-        InvalidateRect(pane.tab, nullptr, TRUE); InvalidateRect(pane.path, nullptr, TRUE);
+        InvalidateRect(pane.tab, nullptr, TRUE); InvalidateRect(pane.path, nullptr, TRUE); InvalidateRect(pane.search, nullptr, TRUE);
         for (HWND header : pane.headers) InvalidateRect(header, nullptr, TRUE);
         InvalidateRect(pane.list, nullptr, TRUE); InvalidateRect(pane.status, nullptr, TRUE);
     }
@@ -3929,10 +3993,10 @@ void SortPane(int paneIndex, SortColumn column) {
         RebuildTimelineRows(pane, selected);
         return;
     }
-    std::sort(pane.items.begin(), pane.items.end(), [column, ascending = pane.ascending](const FileItem& a, const FileItem& b) {
+    std::sort(pane.sourceItems.begin(), pane.sourceItems.end(), [column, ascending = pane.ascending](const FileItem& a, const FileItem& b) {
         return CompareItems(a, b, column, ascending, g_app.preferences.directoriesFirst);
     });
-    ListView_RedrawItems(pane.list, 0, static_cast<int>(pane.items.size()) - 1);
+    ApplyPaneFilter(paneIndex);
 }
 
 void RenameItem(int paneIndex, int itemIndex, const std::wstring& newName) {
@@ -4081,6 +4145,11 @@ void SaveSettings() {
     writeBool(L"Operations", L"ShellContextMenu", g_app.preferences.shellContextMenu);
     writeBool(L"Operations", L"DragMoveSameDrive", g_app.preferences.dragMoveSameDrive);
     writeBool(L"Updates", L"AutomaticChecks", g_app.preferences.automaticUpdates);
+    WritePrivateProfileStringW(L"SidebarPins", L"Count", std::to_wstring(g_app.pinnedFolders.size()).c_str(), g_app.iniPath.c_str());
+    for (size_t index = 0; index < g_app.pinnedFolders.size(); ++index) {
+        const std::wstring key = L"Path" + std::to_wstring(index);
+        WritePrivateProfileStringW(L"SidebarPins", key.c_str(), g_app.pinnedFolders[index].c_str(), g_app.iniPath.c_str());
+    }
     WritePrivateProfileStringW(L"Navigation", L"RefreshMilliseconds",
                                std::to_wstring(g_app.preferences.refreshMilliseconds).c_str(), g_app.iniPath.c_str());
     for (int i = 0; i < 2; ++i) {
@@ -4117,6 +4186,14 @@ void LoadPreferences() {
     g_app.preferences.shellContextMenu = readBool(L"Operations", L"ShellContextMenu", true);
     g_app.preferences.dragMoveSameDrive = readBool(L"Operations", L"DragMoveSameDrive", true);
     g_app.preferences.automaticUpdates = readBool(L"Updates", L"AutomaticChecks", true);
+    g_app.pinnedFolders.clear();
+    const UINT pinnedCount = (std::min)(GetPrivateProfileIntW(L"SidebarPins", L"Count", 0, g_app.iniPath.c_str()), 32U);
+    for (UINT index = 0; index < pinnedCount; ++index) {
+        const std::wstring key = L"Path" + std::to_wstring(index);
+        std::array<wchar_t, 32768> path{};
+        GetPrivateProfileStringW(L"SidebarPins", key.c_str(), L"", path.data(), static_cast<DWORD>(path.size()), g_app.iniPath.c_str());
+        if (path[0] && !IsPinnedFolder(path.data())) g_app.pinnedFolders.emplace_back(path.data());
+    }
     const UINT interval = GetPrivateProfileIntW(L"Navigation", L"RefreshMilliseconds", 1500, g_app.iniPath.c_str());
     g_app.preferences.refreshMilliseconds = interval == 3000 || interval == 5000 ? interval : 1500;
 }
@@ -4298,6 +4375,9 @@ void CreatePane(int index) {
     pane.path = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                 0, 0, 0, 0, g_app.window, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ControlId(index, ID_PATH))), g_app.instance, nullptr);
     SetWindowSubclass(pane.path, PathEditSubclassProc, 3, static_cast<DWORD_PTR>(index));
+    pane.search = CreateWindowExW(0, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                  0, 0, 0, 0, g_app.window, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ControlId(index, ID_SEARCH))), g_app.instance, nullptr);
+    SendMessageW(pane.search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter this folder"));
     const wchar_t* labels[] = {L"Name", L"Ext", L"Size", L"Modified"};
     for (int i = 0; i < 4; ++i) {
         pane.headers[i] = CreateOwnerButton(g_app.window, ControlId(index, ID_HEADER_NAME + i), labels[i]);
@@ -4309,7 +4389,7 @@ void CreatePane(int index) {
                                0, 0, 0, 0, g_app.window, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ControlId(index, ID_LIST))), g_app.instance, nullptr);
     pane.status = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
                                   0, 0, 0, 0, g_app.window, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ControlId(index, ID_STATUS))), g_app.instance, nullptr);
-    ApplyFont(pane.tab); ApplyFont(pane.path); ApplyFont(pane.status);
+    ApplyFont(pane.tab); ApplyFont(pane.path); ApplyFont(pane.search); ApplyFont(pane.status);
     SendMessageW(pane.list, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.fileFont), TRUE);
     TabCtrl_SetItemSize(pane.tab, Scale(150), Scale(29));
     ListView_SetExtendedListViewStyle(pane.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
@@ -4612,6 +4692,8 @@ void ShowSelectionMoreMenu() {
     AppendMenuW(menu, MF_STRING | (validOtherPane ? 0 : MF_GRAYED), ID_COPY, L"Copy to other pane\tF5");
     AppendMenuW(menu, MF_STRING | (validOtherPane ? 0 : MF_GRAYED), ID_MOVE, L"Move to other pane\tF6");
     AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_COPY_PATH, paths.size() == 1 ? L"Copy path" : L"Copy paths");
+    const bool oneFolder = oneItem && attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    AppendMenuW(menu, MF_STRING | (oneFolder && !IsPinnedFolder(paths.front()) ? 0 : MF_GRAYED), ID_PIN_SIDEBAR, L"Pin to sidebar");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_PROPERTIES, L"Properties");
     AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), ID_DELETE_PERMANENT, L"Delete permanently\tShift+Delete");
@@ -4827,6 +4909,21 @@ void ExecuteCommand(UINT id) {
         if (!ShellExecuteExW(&execute)) ShowError(HRESULT_FROM_WIN32(GetLastError()), L"Show folder properties");
         break;
     }
+    case ID_PIN_SIDEBAR: {
+        const auto paths = SelectedPaths(g_app.activePane);
+        if (paths.size() != 1 || IsPinnedFolder(paths.front())) break;
+        const DWORD attributes = GetFileAttributesW(ExtendedPath(paths.front()).c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) break;
+        g_app.pinnedFolders.push_back(paths.front());
+        RebuildSidebar(); SaveSettings();
+        break;
+    }
+    case ID_UNPIN_SIDEBAR:
+        if (!g_app.pendingSidebarTarget.empty()) {
+            std::erase_if(g_app.pinnedFolders, [&](const std::wstring& path) { return SamePath(path, g_app.pendingSidebarTarget); });
+            g_app.pendingSidebarTarget.clear(); RebuildSidebar(); SaveSettings();
+        }
+        break;
     case ID_DUAL: g_app.dualPane = !g_app.dualPane; UpdateDualPaneButton(); LayoutWindow(); break;
     case ID_SWITCH_PANE:
         SetActivePane(1 - g_app.activePane); SetFocus(g_app.panes[g_app.activePane].list); LayoutWindow(); break;
@@ -4853,6 +4950,7 @@ void ExecuteCommand(UINT id) {
     case ID_NEW_TAB: AddTab(g_app.activePane); break;
     case ID_CLOSE_TAB: CloseTab(g_app.activePane); break;
     case ID_FOCUS_PATH: SetFocus(active.path); SendMessageW(active.path, EM_SETSEL, 0, -1); break;
+    case ID_FOCUS_SEARCH: SetFocus(active.search); SendMessageW(active.search, EM_SETSEL, 0, -1); break;
     case ID_SELECT_ALL: ListView_SetItemState(active.list, -1, LVIS_SELECTED, LVIS_SELECTED); break;
     case ID_CLIP_COPY: PutSelectionOnClipboard(false); break;
     case ID_CLIP_CUT: if (active.mode == PaneMode::RecycleBin) InvokeRecycleVerb("undelete", L"undelete", false); else PutSelectionOnClipboard(true); break;
@@ -4883,7 +4981,7 @@ void ExecuteCommand(UINT id) {
     case ID_EXIT: SendMessageW(g_app.window, WM_CLOSE, 0, 0); break;
     case ID_ABOUT:
         MessageBoxW(g_app.window,
-                    L"Files4Me 0.3-alpha\n\nLightweight native dual-pane file manager.\nC++20 and Windows system APIs only.\n\nMaterial Icons by Google, Apache License 2.0.",
+                    L"Files4Me " FILES4ME_VERSION_DISPLAY_W L"\n\nLightweight native dual-pane file manager.\nC++20 and Windows system APIs only.\n\nMaterial Icons by Google, Apache License 2.0.",
                     L"About Files4Me", MB_OK | MB_ICONINFORMATION);
         break;
     case ID_SHORTCUTS:
@@ -4900,6 +4998,19 @@ LRESULT HandleNotify(NMHDR* header) {
             const int item = reinterpret_cast<NMITEMACTIVATE*>(header)->iItem;
             if (item >= 0 && item < static_cast<int>(g_app.sidebarItems.size()) &&
                 g_app.sidebarItems[item].action != SidebarAction::Separator) ActivateSidebarItem(item);
+        } else if (header->code == NM_RCLICK) {
+            const int item = reinterpret_cast<NMITEMACTIVATE*>(header)->iItem;
+            if (item >= 0 && item < static_cast<int>(g_app.sidebarItems.size()) && g_app.sidebarItems[item].pinned) {
+                POINT point{}; GetCursorPos(&point);
+                HMENU menu = CreatePopupMenu();
+                AppendMenuW(menu, MF_STRING, ID_UNPIN_SIDEBAR, L"Unpin from sidebar");
+                PrepareThemedMenu(menu);
+                g_app.pendingSidebarTarget = g_app.sidebarItems[item].target;
+                const UINT selected = TrackModernPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, g_app.window);
+                DestroyMenu(menu);
+                if (selected) SendMessageW(g_app.window, WM_COMMAND, selected, 0);
+                else g_app.pendingSidebarTarget.clear();
+            }
         } else if (header->code == NM_CUSTOMDRAW) {
             auto* custom = reinterpret_cast<NMLVCUSTOMDRAW*>(header);
             if (custom->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
@@ -5354,7 +5465,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         for (HWND button : g_app.menuButtons) ApplyFont(button);
         for (HWND button : g_app.operationButtons) ApplyFont(button);
         for (Pane& pane : g_app.panes) {
-            ApplyFont(pane.tab); ApplyFont(pane.drives); ApplyFont(pane.path); ApplyFont(pane.status);
+            ApplyFont(pane.tab); ApplyFont(pane.drives); ApplyFont(pane.path); ApplyFont(pane.search); ApplyFont(pane.status);
             SendMessageW(pane.list, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.fileFont), TRUE);
             for (HWND header : pane.headers) ApplyFont(header);
             TabCtrl_SetItemSize(pane.tab, Scale(150), Scale(29));
@@ -5401,6 +5512,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 if (HIWORD(wParam) == EN_KILLFOCUS) {
                     const std::wstring& current = g_app.panes[paneIndex].tabs[g_app.panes[paneIndex].activeTab].path;
                     SetWindowTextW(g_app.panes[paneIndex].path, (IsVirtualLocation(current) ? DisplayNameForPath(current) : current).c_str());
+                }
+                break;
+            case ID_SEARCH:
+                if (HIWORD(wParam) == EN_SETFOCUS) SetActivePane(paneIndex);
+                if (HIWORD(wParam) == EN_CHANGE) {
+                    wchar_t filter[512]{};
+                    GetWindowTextW(g_app.panes[paneIndex].search, filter, ARRAYSIZE(filter));
+                    g_app.panes[paneIndex].filterText = filter;
+                    ApplyPaneFilter(paneIndex);
                 }
                 break;
             case ID_HEADER_NAME: if (HIWORD(wParam) == BN_CLICKED) { SetActivePane(paneIndex); SortPane(paneIndex, SortColumn::Name); } break;
@@ -5530,7 +5650,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         RECT versionRect{client.left + Scale(12), client.bottom - Scale(26), client.right - Scale(12), client.bottom - Scale(6)};
         SelectObject(dc, g_app.font); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, g_app.colors.muted);
-        DrawTextW(dc, L"Files4Me-0.3-alpha", -1, &versionRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(dc, L"Files4Me-" FILES4ME_VERSION_DISPLAY_W, -1, &versionRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         EndPaint(window, &paint); return 0;
     }
     case WM_APP_UPDATE_DONE:
@@ -5564,8 +5684,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
             RebuildTimelineRows(pane);
         } else {
-            pane.items = std::move(result->items);
-            ListView_SetItemCountEx(pane.list, static_cast<int>(pane.items.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+            pane.sourceItems = std::move(result->items);
+            ApplyPaneFilter(result->pane, false);
         }
         WIN32_FILE_ATTRIBUTE_DATA directoryAttributes{};
         if (GetFileAttributesExW(ExtendedPath(result->path).c_str(), GetFileExInfoStandard, &directoryAttributes)) {
@@ -5575,7 +5695,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (result->pane == g_app.activePane) UpdateSelectionCommands();
         std::wstring status;
         if (result->error != ERROR_SUCCESS) status = L"Unable to read folder. Error " + std::to_wstring(result->error);
-        else status = std::to_wstring(pane.timeline ? pane.timelineItems.size() : pane.items.size()) + L" items";
+        else if (pane.filterText.empty()) status = std::to_wstring(pane.timeline ? pane.timelineItems.size() : pane.sourceItems.size()) + L" items";
+        else status = std::to_wstring(std::count_if(pane.items.begin(), pane.items.end(), [](const FileItem& item) { return item.IsActionable(); })) +
+                          L" of " + std::to_wstring(pane.timeline ? pane.timelineItems.size() : pane.sourceItems.size()) + L" items";
         SetWindowTextW(pane.status, status.c_str());
         InvalidateRect(pane.list, nullptr, TRUE);
         BeginPendingRename(pane);
@@ -5592,8 +5714,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             SetWindowTextW(pane.status, L"Unable to read ZIP archive");
             ShowError(result->result, L"Open ZIP archive"); return 0;
         }
-        pane.items = std::move(result->items);
-        ListView_SetItemCountEx(pane.list, static_cast<int>(pane.items.size()), LVSICF_NOINVALIDATEALL | LVSICF_NOSCROLL);
+        pane.sourceItems = std::move(result->items);
+        ApplyPaneFilter(result->pane, false);
         SetWindowTextW(pane.status, (std::to_wstring(pane.items.size()) + L" items - read only").c_str());
         InvalidateRect(pane.list, nullptr, TRUE); LayoutWindow(); UpdateSelectionCommands(); return 0;
     }
@@ -5700,7 +5822,8 @@ HACCEL CreateAccelerators() {
         {FVIRTKEY, VK_F7, ID_CREATE_FOLDER}, {FVIRTKEY, VK_F8, ID_DELETE}, {FVIRTKEY, VK_DELETE, ID_DELETE},
         {static_cast<BYTE>(FVIRTKEY | FSHIFT), VK_DELETE, ID_DELETE_PERMANENT},
         {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'T', ID_NEW_TAB}, {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'W', ID_CLOSE_TAB},
-        {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'L', ID_FOCUS_PATH}, {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'A', ID_SELECT_ALL},
+        {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'L', ID_FOCUS_PATH}, {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'F', ID_FOCUS_SEARCH},
+        {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'A', ID_SELECT_ALL},
         {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'C', ID_CLIP_COPY}, {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'X', ID_CLIP_CUT},
         {static_cast<BYTE>(FVIRTKEY | FCONTROL), 'V', ID_CLIP_PASTE},
         {static_cast<BYTE>(FVIRTKEY | FALT), 'F', ID_MENU_FILE}, {static_cast<BYTE>(FVIRTKEY | FALT), 'E', ID_MENU_EDIT},
@@ -5788,10 +5911,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         bool bypassAccelerators = false;
         if (message.message == WM_KEYDOWN) {
             HWND focus = GetFocus();
+            for (Pane& pane : g_app.panes) {
+                if (focus == pane.search) {
+                    if (message.wParam == VK_ESCAPE) {
+                        SetWindowTextW(pane.search, L"");
+                        SetFocus(pane.list);
+                        bypassAccelerators = true;
+                    } else if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && message.wParam != 'L') {
+                        bypassAccelerators = true;
+                    }
+                    break;
+                }
+            }
             if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
                 (message.wParam == VK_BACK || message.wParam == VK_DELETE)) {
                 for (const Pane& pane : g_app.panes)
-                    if (focus == pane.path) { bypassAccelerators = true; break; }
+                    if (focus == pane.path || focus == pane.search) { bypassAccelerators = true; break; }
             }
             if (g_app.layoutPopup && IsWindow(g_app.layoutPopup) &&
                 (focus == g_app.layoutPopup || IsChild(g_app.layoutPopup, focus))) {
@@ -5821,6 +5956,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
                         wchar_t value[32768]{}; GetWindowTextW(focus, value, ARRAYSIZE(value));
                         SetActivePane(i); Navigate(i, value); handled = true; break;
                     }
+                    if (focus == g_app.panes[i].search) { SetFocus(g_app.panes[i].list); handled = true; break; }
                     if (focus == g_app.panes[i].list) { SetActivePane(i); OpenFocused(); handled = true; break; }
                 }
                 if (handled) continue;

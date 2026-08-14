@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <string>
+#include "version.h"
 
 enum class UpdateStatus { UpToDate, Available, DownloadReady, NetworkError, InvalidManifest, VerificationFailed };
 
@@ -24,7 +25,7 @@ struct UpdateResult {
     bool manual = false;
 };
 
-constexpr wchar_t Files4MeCurrentVersion[] = L"0.3.0-alpha.0";
+constexpr wchar_t Files4MeCurrentVersion[] = FILES4ME_VERSION_SEMVER_W;
 constexpr wchar_t Files4MeUpdateManifestUrl[] =
     L"https://raw.githubusercontent.com/adamng04/Files4Me/main/updates/alpha/manifest.ini";
 

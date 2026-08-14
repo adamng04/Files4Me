@@ -1,8 +1,9 @@
 #include "resource.h"
+#include "version.h"
 
 IDR_VERSION VERSIONINFO
- FILEVERSION 0,3,0,0
- PRODUCTVERSION 0,3,0,0
+ FILEVERSION FILES4ME_VERSION_NUMERIC
+ PRODUCTVERSION FILES4ME_VERSION_NUMERIC
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -19,12 +20,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "adamng04 and Files4Me contributors"
             VALUE "FileDescription", "Files4Me native file manager"
-            VALUE "FileVersion", "0.3-alpha"
+            VALUE "FileVersion", FILES4ME_VERSION_DISPLAY_A
             VALUE "InternalName", "Files4Me"
             VALUE "LegalCopyright", "Copyright (c) 2026 adamng04 and Files4Me contributors"
             VALUE "OriginalFilename", "Files4Me.exe"
             VALUE "ProductName", "Files4Me"
-            VALUE "ProductVersion", "0.3-alpha"
+            VALUE "ProductVersion", FILES4ME_VERSION_DISPLAY_A
         END
     END
     BLOCK "VarFileInfo"
