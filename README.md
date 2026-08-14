@@ -61,6 +61,8 @@ Google Material Icons are embedded in the executable for offline use and distrib
 
 Selected files support native Windows OLE drag-and-drop to the other pane, folders, Explorer, the desktop, and compatible applications. Right-click uses the full Windows Shell context menu, including installed shell extensions.
 
+Files4Me 0.6 restores the Windows Shell folder-background context menu, adds pin/unpin commands for folder items and the current directory, and keeps file clipboard operations scoped to the active pane. Release artifacts are `Files4Me-0.6-alpha-portable.exe` and `Files4Me-0.6-alpha-Setup.exe`; this build is not advertised through the installed-build update manifest.
+
 Downloads uses an Explorer-style date timeline (Today, Yesterday, this week, and older groups). ZIP files open as read-only folders using Windows' built-in compressed-folder handler; files can be opened, copied, dragged out, or extracted without bundling an archive library. Checkbox space is reserved in Details view so names never overlap selection controls.
 
 The archive smoke test in `tests/archive_smoke.cpp` verifies real Windows ZIP enumeration and extraction against a generated fixture.

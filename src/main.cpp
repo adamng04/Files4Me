@@ -482,6 +482,16 @@ COLORREF ToolbarColor() {
     return g_app.theme == ThemeMode::Dark ? RGB(38, 38, 38) : RGB(232, 232, 232);
 }
 
+COLORREF FileRowSelectionColor() {
+    if (IsHighContrast()) return GetSysColor(COLOR_HIGHLIGHT);
+    return g_app.theme == ThemeMode::Dark ? RGB(78, 78, 78) : RGB(218, 218, 218);
+}
+
+COLORREF FileRowSelectionTextColor() {
+    if (IsHighContrast()) return GetSysColor(COLOR_HIGHLIGHTTEXT);
+    return g_app.theme == ThemeMode::Dark ? RGB(255, 255, 255) : RGB(24, 24, 24);
+}
+
 void ReleaseBrush(HBRUSH& brush) {
     if (brush) DeleteObject(brush);
     brush = nullptr;
@@ -821,6 +831,12 @@ bool IsPinnedFolder(const std::wstring& path) {
     return std::any_of(g_app.pinnedFolders.begin(), g_app.pinnedFolders.end(), [&](const std::wstring& pinned) {
         return SamePath(pinned, path);
     });
+}
+
+bool IsFilesystemDirectory(const std::wstring& path) {
+    if (path.empty() || IsVirtualLocation(path)) return false;
+    const DWORD attributes = GetFileAttributesW(ExtendedPath(path).c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 void RebuildSidebar() {
@@ -1635,6 +1651,9 @@ void PutSelectionOnClipboard(bool cut) {
 }
 
 void PasteClipboard() {
+    if (!ActiveFolderAcceptsPaste()) return;
+    const Pane& destinationPane = g_app.panes[g_app.activePane];
+    const std::wstring destination = destinationPane.tabs[destinationPane.activeTab].path;
     if (!OpenClipboard(g_app.window)) return;
     HDROP drop = static_cast<HDROP>(GetClipboardData(CF_HDROP));
     std::vector<std::wstring> paths;
@@ -1657,8 +1676,7 @@ void PasteClipboard() {
     }
     CloseClipboard();
     if (paths.empty()) return;
-    Pane& pane = g_app.panes[g_app.activePane];
-    EnqueueOperation(move ? ID_MOVE : ID_COPY, std::move(paths), pane.tabs[pane.activeTab].path, {});
+    EnqueueOperation(move ? ID_MOVE : ID_COPY, std::move(paths), destination, {});
 }
 
 void ShowError(HRESULT result, const wchar_t* action) {
@@ -2113,7 +2131,8 @@ bool PaneSupportsCheckboxes(const Pane& pane) {
 void InvalidateListItem(HWND list, int item) {
     if (!list || item < 0) return;
     RECT bounds{};
-    if (ListView_GetItemRect(list, item, &bounds, LVIR_BOUNDS)) InvalidateRect(list, &bounds, FALSE);
+    if (ListView_GetItemRect(list, item, &bounds, LVIR_BOUNDS))
+        RedrawWindow(list, &bounds, nullptr, RDW_INVALIDATE | RDW_NOERASE);
 }
 
 bool IsCheckboxHit(const Pane& pane, const LVHITTESTINFO& hit) {
@@ -2135,6 +2154,9 @@ LRESULT CALLBACK ListSubclassProc(HWND window, UINT message, WPARAM wParam, LPAR
     const int paneIndex = static_cast<int>(paneValue);
     if (paneIndex < 0 || paneIndex > 1) return DefSubclassProc(window, message, wParam, lParam);
     Pane& pane = g_app.panes[paneIndex];
+    // The list view and its owner-drawn rows already paint every pixel.  Do not
+    // expose the control background between the old and new hover frames.
+    if (message == WM_ERASEBKGND) return 1;
     if (message == WM_STYLECHANGING && wParam == GWL_STYLE) {
         reinterpret_cast<STYLESTRUCT*>(lParam)->styleNew &= ~WS_HSCROLL;
     }
@@ -2162,20 +2184,18 @@ LRESULT CALLBACK ListSubclassProc(HWND window, UINT message, WPARAM wParam, LPAR
             return 0;
         }
     } else if (message == WM_MOUSEMOVE) {
-        if (PaneSupportsCheckboxes(pane)) {
-            LVHITTESTINFO hover{};
-            hover.pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            ListView_HitTest(window, &hover);
-            const int hovered = hover.iItem;
-            if (hovered != pane.hoveredCheckboxItem) {
-                const int previous = pane.hoveredCheckboxItem;
-                pane.hoveredCheckboxItem = hovered;
-                InvalidateListItem(window, previous);
-                InvalidateListItem(window, hovered);
-            }
-            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
-            TrackMouseEvent(&tracking);
+        LVHITTESTINFO hover{};
+        hover.pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ListView_HitTest(window, &hover);
+        const int hovered = hover.iItem;
+        if (hovered != pane.hoveredCheckboxItem) {
+            const int previous = pane.hoveredCheckboxItem;
+            pane.hoveredCheckboxItem = hovered;
+            InvalidateListItem(window, previous);
+            InvalidateListItem(window, hovered);
         }
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+        TrackMouseEvent(&tracking);
     } else if (message == WM_MOUSELEAVE) {
         const int previous = pane.hoveredCheckboxItem;
         pane.hoveredCheckboxItem = -1;
@@ -3037,9 +3057,12 @@ void LayoutPane(int paneIndex, RECT bounds) {
     ShowWindow(pane.tab, SW_HIDE);
     const int driveWidth = Scale(74);
     const int searchWidth = (std::min)(Scale(230), (std::max)(Scale(130), width / 3));
+    const int editInset = Scale(2);
     MoveWindow(pane.drives, x, y, driveWidth, rowHeight, TRUE);
-    MoveWindow(pane.path, x + driveWidth + gap, y, width - driveWidth - searchWidth - gap * 2, rowHeight, TRUE);
-    MoveWindow(pane.search, x + width - searchWidth, y, searchWidth, rowHeight, TRUE); y += rowHeight + gap;
+    MoveWindow(pane.path, x + driveWidth + gap, y + editInset,
+               width - driveWidth - searchWidth - gap * 2, rowHeight - editInset * 2, TRUE);
+    MoveWindow(pane.search, x + width - searchWidth, y + editInset,
+               searchWidth, rowHeight - editInset * 2, TRUE); y += rowHeight + gap;
     const bool details = pane.mode == PaneMode::RecycleBin || pane.mode == PaneMode::Archive ||
                          (pane.mode == PaneMode::Filesystem && pane.view == FileViewMode::Details);
     EnsureColumnWidths(pane, width);
@@ -3751,16 +3774,19 @@ UINT TrackModernPopupMenu(HMENU menu, UINT flags, int x, int y, HWND owner, LPTP
 
 LRESULT CALLBACK ToolbarButtonSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
                                            UINT_PTR, DWORD_PTR) {
+    // BS_OWNERDRAW paints the complete client area.  Suppressing the class
+    // erase prevents a default button-colored frame from flashing on hover.
+    if (message == WM_ERASEBKGND) return 1;
     if (message == WM_MOUSEMOVE) {
         if (g_app.hoveredToolbarButton != window) {
             HWND previous = g_app.hoveredToolbarButton; g_app.hoveredToolbarButton = window;
-            if (previous) InvalidateRect(previous, nullptr, TRUE);
-            InvalidateRect(window, nullptr, TRUE);
+            if (previous) RedrawWindow(previous, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE);
+            RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE);
         }
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0}; TrackMouseEvent(&tracking);
     } else if (message == WM_MOUSELEAVE) {
         if (g_app.hoveredToolbarButton == window) g_app.hoveredToolbarButton = nullptr;
-        InvalidateRect(window, nullptr, TRUE);
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE);
     } else if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(window, ToolbarButtonSubclassProc, 1);
     }
@@ -4276,6 +4302,7 @@ HWND CreateOwnerButton(HWND parent, UINT id, const wchar_t* text) {
     HWND button = CreateWindowExW(0, WC_BUTTONW, text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                   0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)), g_app.instance, nullptr);
     ApplyFont(button);
+    SetWindowSubclass(button, ToolbarButtonSubclassProc, 1, 0);
     return button;
 }
 
@@ -4419,6 +4446,9 @@ void CreatePane(int index) {
 }
 
 void ShowFallbackContextMenu(POINT point) {
+    const std::vector<std::wstring> selectedPaths = SelectedPaths(g_app.activePane);
+    const std::wstring pinTarget = selectedPaths.size() == 1 && IsFilesystemDirectory(selectedPaths.front())
+        ? selectedPaths.front() : std::wstring{};
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, ID_OPEN, L"Open\tEnter");
     if (!SelectedZipPath(g_app.activePane).empty())
@@ -4432,48 +4462,73 @@ void ShowFallbackContextMenu(POINT point) {
     AppendMenuW(menu, MF_STRING, ID_CLIP_COPY, L"Copy\tCtrl+C");
     AppendMenuW(menu, MF_STRING, ID_CLIP_CUT, L"Cut\tCtrl+X");
     AppendMenuW(menu, MF_STRING, ID_CLIP_PASTE, L"Paste\tCtrl+V");
+    if (!pinTarget.empty()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, IsPinnedFolder(pinTarget) ? ID_UNPIN_SIDEBAR : ID_PIN_SIDEBAR,
+                    IsPinnedFolder(pinTarget) ? L"Unpin from sidebar" : L"Pin to sidebar");
+    }
     PrepareThemedMenu(menu);
     UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, g_app.window, nullptr);
     DestroyMenu(menu);
-    if (command) SendMessageW(g_app.window, WM_COMMAND, command, 0);
+    if (command) {
+        if (command == ID_PIN_SIDEBAR || command == ID_UNPIN_SIDEBAR) g_app.pendingSidebarTarget = pinTarget;
+        SendMessageW(g_app.window, WM_COMMAND, command, 0);
+    }
 }
 
 void ShowBackgroundContextMenu(int paneIndex, POINT point) {
     Pane& pane = g_app.panes[paneIndex];
     if (pane.mode != PaneMode::Filesystem || pane.tabs.empty()) return;
+    SetActivePane(paneIndex);
     ListView_SetItemState(pane.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
     UpdateSelectionCommands();
 
+    const std::wstring folderPath = pane.tabs[pane.activeTab].path;
+    ComPtr<IShellItem> shellItem;
+    ComPtr<IShellFolder> shellFolder;
+    ComPtr<IContextMenu> contextMenu;
+    HRESULT result = SHCreateItemFromParsingName(folderPath.c_str(), nullptr, IID_PPV_ARGS(&shellItem));
+    if (SUCCEEDED(result)) result = shellItem->BindToHandler(nullptr, BHID_SFObject, IID_PPV_ARGS(&shellFolder));
+    if (SUCCEEDED(result)) result = shellFolder->CreateViewObject(g_app.window, IID_PPV_ARGS(&contextMenu));
+    if (FAILED(result) || !contextMenu) { ShowError(result, L"Open Windows folder menu"); return; }
+
     HMENU menu = CreatePopupMenu();
-    HMENU view = CreatePopupMenu();
-    HMENU sort = CreatePopupMenu();
-    HMENU newItems = BuildNewItemsMenu();
-    if (!menu || !view || !sort || !newItems) {
-        if (menu) DestroyMenu(menu); else { if (view) DestroyMenu(view); if (sort) DestroyMenu(sort); if (newItems) DestroyMenu(newItems); }
+    if (!menu) return;
+    result = contextMenu->QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL);
+    if (FAILED(result)) { DestroyMenu(menu); ShowError(result, L"Open Windows folder menu"); return; }
+
+    const UINT pinCommand = IsPinnedFolder(folderPath) ? ID_UNPIN_SIDEBAR : ID_PIN_SIDEBAR;
+    InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, pinCommand,
+                pinCommand == ID_PIN_SIDEBAR ? L"Pin to sidebar" : L"Unpin from sidebar");
+    InsertMenuW(menu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+
+    contextMenu.As(&g_app.activeContextMenu3);
+    contextMenu.As(&g_app.activeContextMenu2);
+    SetForegroundWindow(g_app.window);
+    const UINT command = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                           point.x, point.y, g_app.window, nullptr);
+    PostMessageW(g_app.window, WM_NULL, 0, 0);
+    g_app.activeContextMenu3.Reset();
+    g_app.activeContextMenu2.Reset();
+    DestroyMenu(menu);
+    if (!command) return;
+    if (command == ID_PIN_SIDEBAR || command == ID_UNPIN_SIDEBAR) {
+        g_app.pendingSidebarTarget = folderPath;
+        SendMessageW(g_app.window, WM_COMMAND, command, 0);
         return;
     }
-    for (UINT viewId = ID_VIEW_EXTRA_LARGE; viewId <= ID_VIEW_CONTENT; ++viewId) {
-        const UINT checked = CommandFromViewMode(pane.view) == viewId ? MF_CHECKED : 0;
-        AppendMenuW(view, MF_STRING | checked, viewId, ViewModeName(ViewModeFromCommand(viewId)));
-    }
-    AppendMenuW(sort, MF_STRING | (pane.sort == SortColumn::Name ? MF_CHECKED : 0), ID_SORT_NAME, L"Name");
-    AppendMenuW(sort, MF_STRING | (pane.sort == SortColumn::Extension ? MF_CHECKED : 0), ID_SORT_EXTENSION, L"Type");
-    AppendMenuW(sort, MF_STRING | (pane.sort == SortColumn::Size ? MF_CHECKED : 0), ID_SORT_SIZE, L"Size");
-    AppendMenuW(sort, MF_STRING | (pane.sort == SortColumn::Modified ? MF_CHECKED : 0), ID_SORT_MODIFIED, L"Date modified");
 
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"View");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sort), L"Sort by");
-    AppendMenuW(menu, MF_STRING, ID_REFRESH, L"Refresh");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (IsClipboardFormatAvailable(CF_HDROP) ? 0 : MF_GRAYED), ID_CLIP_PASTE, L"Paste\tCtrl+V");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(newItems), L"New");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, ID_FOLDER_PROPERTIES, L"Properties");
-    PrepareThemedMenu(menu);
-    const UINT command = TrackModernPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                                               point.x, point.y, g_app.window);
-    DestroyMenu(menu);
-    if (command) SendMessageW(g_app.window, WM_COMMAND, command, 0);
+    CMINVOKECOMMANDINFOEX invoke{};
+    invoke.cbSize = sizeof(invoke);
+    invoke.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+    invoke.hwnd = g_app.window;
+    invoke.lpVerb = MAKEINTRESOURCEA(command - 1);
+    invoke.lpVerbW = MAKEINTRESOURCEW(command - 1);
+    invoke.nShow = SW_SHOWNORMAL;
+    invoke.ptInvoke = point;
+    result = contextMenu->InvokeCommand(reinterpret_cast<LPCMINVOKECOMMANDINFO>(&invoke));
+    ShowError(result, L"Shell command");
+    RefreshAll();
 }
 
 void ShowContextMenu(int paneIndex, POINT point) {
@@ -4521,6 +4576,14 @@ void ShowContextMenu(int paneIndex, POINT point) {
     if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) flags |= CMF_EXTENDEDVERBS;
     result = contextMenu->QueryContextMenu(menu, 0, 1, 0x7FFF, flags);
     if (FAILED(result)) { DestroyMenu(menu); ShowFallbackContextMenu(point); return; }
+    const std::wstring pinTarget = paths.size() == 1 && IsFilesystemDirectory(paths.front())
+        ? paths.front() : std::wstring{};
+    if (!pinTarget.empty()) {
+        const UINT pinCommand = IsPinnedFolder(pinTarget) ? ID_UNPIN_SIDEBAR : ID_PIN_SIDEBAR;
+        InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, pinCommand,
+                    pinCommand == ID_PIN_SIDEBAR ? L"Pin to sidebar" : L"Unpin from sidebar");
+        InsertMenuW(menu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    }
     if (!SelectedZipPath(paneIndex).empty()) {
         InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, ID_EXTRACT_ALL, L"Extract all");
         InsertMenuW(menu, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
@@ -4537,6 +4600,11 @@ void ShowContextMenu(int paneIndex, POINT point) {
     DestroyMenu(menu);
     if (command == 0) return;
     if (command == ID_EXTRACT_ALL) { SendMessageW(g_app.window, WM_COMMAND, ID_EXTRACT_ALL, 0); return; }
+    if (command == ID_PIN_SIDEBAR || command == ID_UNPIN_SIDEBAR) {
+        g_app.pendingSidebarTarget = pinTarget;
+        SendMessageW(g_app.window, WM_COMMAND, command, 0);
+        return;
+    }
 
     CMINVOKECOMMANDINFOEX invoke{};
     invoke.cbSize = sizeof(invoke);
@@ -4910,11 +4978,14 @@ void ExecuteCommand(UINT id) {
         break;
     }
     case ID_PIN_SIDEBAR: {
-        const auto paths = SelectedPaths(g_app.activePane);
-        if (paths.size() != 1 || IsPinnedFolder(paths.front())) break;
-        const DWORD attributes = GetFileAttributesW(ExtendedPath(paths.front()).c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) break;
-        g_app.pinnedFolders.push_back(paths.front());
+        std::wstring target = std::move(g_app.pendingSidebarTarget);
+        g_app.pendingSidebarTarget.clear();
+        if (target.empty()) {
+            const auto paths = SelectedPaths(g_app.activePane);
+            if (paths.size() == 1) target = paths.front();
+        }
+        if (!IsFilesystemDirectory(target) || IsPinnedFolder(target)) break;
+        g_app.pinnedFolders.push_back(std::move(target));
         RebuildSidebar(); SaveSettings();
         break;
     }
@@ -5111,7 +5182,14 @@ LRESULT HandleNotify(NMHDR* header) {
         const int row = reinterpret_cast<NMITEMACTIVATE*>(header)->iItem;
         POINT point{}; GetCursorPos(&point);
         if (row < 0) ShowBackgroundContextMenu(paneIndex, point);
-        else ShowContextMenu(paneIndex, point);
+        else {
+            if ((ListView_GetItemState(pane.list, row, LVIS_SELECTED) & LVIS_SELECTED) == 0) {
+                ListView_SetItemState(pane.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+                ListView_SetItemState(pane.list, row, LVIS_SELECTED | LVIS_FOCUSED,
+                                      LVIS_SELECTED | LVIS_FOCUSED);
+            }
+            ShowContextMenu(paneIndex, point);
+        }
     } else if (local == ID_LIST && header->code == LVN_BEGINDRAG) {
         SetActivePane(paneIndex);
         const int item = reinterpret_cast<NMLISTVIEW*>(header)->iItem;
@@ -5182,7 +5260,7 @@ LRESULT HandleNotify(NMHDR* header) {
                 IntersectClipRect(custom->nmcd.hdc, cell.left, cell.top, cell.right, cell.bottom);
                 const bool selected = (ListView_GetItemState(pane.list, itemIndex, LVIS_SELECTED) & LVIS_SELECTED) != 0;
                 const bool hovered = pane.hoveredCheckboxItem == itemIndex;
-                HBRUSH background = CreateSolidBrush(selected ? g_app.colors.selection :
+                HBRUSH background = CreateSolidBrush(selected ? FileRowSelectionColor() :
                                                      (hovered ? g_app.colors.buttonPressed : g_app.colors.surface));
                 FillRect(custom->nmcd.hdc, &cell, background); DeleteObject(background);
                 const int checkboxSize = (std::max)(Scale(18), 16);
@@ -5198,11 +5276,30 @@ LRESULT HandleNotify(NMHDR* header) {
                           cell.right - Scale(5), cell.bottom};
                 SetBkMode(custom->nmcd.hdc, TRANSPARENT);
                 SetTextColor(custom->nmcd.hdc, IsCutPath(item.fullPath) ? g_app.colors.muted :
-                             (selected ? g_app.colors.selectionText : g_app.colors.text));
+                             (selected ? FileRowSelectionTextColor() : g_app.colors.text));
                 SelectObject(custom->nmcd.hdc, g_app.fileFont ? g_app.fileFont : g_app.font);
                 DrawTextW(custom->nmcd.hdc, item.name.c_str(), -1, &text,
                           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
                 RestoreDC(custom->nmcd.hdc, savedDc);
+                return CDRF_SKIPDEFAULT;
+            }
+            if (custom->iSubItem > 0 && itemIndex >= 0 && itemIndex < static_cast<int>(pane.items.size()) &&
+                pane.items[itemIndex].IsActionable() && pane.view == FileViewMode::Details &&
+                (ListView_GetItemState(pane.list, itemIndex, LVIS_SELECTED) & LVIS_SELECTED) != 0) {
+                const FileItem& item = pane.items[itemIndex];
+                RECT cell = custom->nmcd.rc;
+                HBRUSH background = CreateSolidBrush(FileRowSelectionColor());
+                FillRect(custom->nmcd.hdc, &cell, background); DeleteObject(background);
+                std::wstring text;
+                if (custom->iSubItem == 1) text = g_app.preferences.showExtensions ? item.extension : L"";
+                else if (custom->iSubItem == 2) text = item.IsDirectory() ? L"" : FormatSize(item.size);
+                else if (custom->iSubItem == 3) text = FormatTime(item.modified);
+                cell.left += Scale(7); cell.right -= Scale(7);
+                SetBkMode(custom->nmcd.hdc, TRANSPARENT);
+                SetTextColor(custom->nmcd.hdc, IsCutPath(item.fullPath) ? g_app.colors.muted : FileRowSelectionTextColor());
+                SelectObject(custom->nmcd.hdc, g_app.fileFont ? g_app.fileFont : g_app.font);
+                DrawTextW(custom->nmcd.hdc, text.c_str(), -1, &cell,
+                          (custom->iSubItem == 2 ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
                 return CDRF_SKIPDEFAULT;
             }
             return CDRF_DODEFAULT;
@@ -5290,7 +5387,7 @@ LRESULT HandleNotify(NMHDR* header) {
             if (pane.view == FileViewMode::Content && itemIndex >= 0 && itemIndex < static_cast<int>(pane.items.size())) {
                 const FileItem& item = pane.items[itemIndex];
                 RECT row = custom->nmcd.rc;
-                HBRUSH background = CreateSolidBrush(selected ? g_app.colors.selection :
+                HBRUSH background = CreateSolidBrush(selected ? FileRowSelectionColor() :
                                                      (hovered ? g_app.colors.buttonPressed : g_app.colors.surface));
                 FillRect(custom->nmcd.hdc, &row, background); DeleteObject(background);
                 const int checkboxSize = (std::max)(Scale(18), 16);
@@ -5308,7 +5405,7 @@ LRESULT HandleNotify(NMHDR* header) {
                 RECT nameRect{textLeft, row.top + Scale(8), row.right - Scale(10), row.top + Scale(31)};
                 SetBkMode(custom->nmcd.hdc, TRANSPARENT);
                 SetTextColor(custom->nmcd.hdc, cut ? g_app.colors.muted :
-                             (selected ? g_app.colors.selectionText : g_app.colors.text));
+                             (selected ? FileRowSelectionTextColor() : g_app.colors.text));
                 SelectObject(custom->nmcd.hdc, g_app.fileFont ? g_app.fileFont : g_app.font);
                 DrawTextW(custom->nmcd.hdc, item.name.c_str(), -1, &nameRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 std::wstring metadata = item.IsDirectory() ? L"File folder" : item.type;
@@ -5316,12 +5413,12 @@ LRESULT HandleNotify(NMHDR* header) {
                 metadata += L"  ·  " + FormatTime(item.modified);
                 RECT detailRect{textLeft, row.top + Scale(33), row.right - Scale(10), row.bottom - Scale(5)};
                 SetTextColor(custom->nmcd.hdc, cut ? g_app.colors.muted :
-                             (selected ? g_app.colors.selectionText : g_app.colors.muted));
+                             (selected ? FileRowSelectionTextColor() : g_app.colors.muted));
                 DrawTextW(custom->nmcd.hdc, metadata.c_str(), -1, &detailRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
                 return CDRF_SKIPDEFAULT;
             }
-            custom->clrText = cut ? g_app.colors.muted : (selected ? g_app.colors.selectionText : g_app.colors.text);
-            custom->clrTextBk = selected ? g_app.colors.selection :
+            custom->clrText = cut ? g_app.colors.muted : (selected ? FileRowSelectionTextColor() : g_app.colors.text);
+            custom->clrTextBk = selected ? FileRowSelectionColor() :
                                 (hovered ? g_app.colors.buttonPressed : g_app.colors.surface);
             const bool customDetails = pane.view == FileViewMode::Details &&
                                        (pane.mode == PaneMode::Filesystem || pane.mode == PaneMode::Archive);
@@ -5386,12 +5483,10 @@ void CreateUi(HWND window) {
     const UINT ids[] = {ID_BACK, ID_FORWARD, ID_UP, ID_REFRESH, ID_NEW_FOLDER, ID_THEME_TOGGLE, ID_VIEW_LAYOUT, ID_DUAL};
     static const wchar_t* labels[] = {L"Back", L"Forward", L"Up", L"Refresh", L"New", L"Toggle light/dark theme", L"Change file layout", L"Dual pane"};
     for (size_t i = 0; i < g_app.commandButtons.size(); ++i) g_app.commandButtons[i] = CreateOwnerButton(window, ids[i], labels[i]);
-    for (HWND button : g_app.commandButtons) SetWindowSubclass(button, ToolbarButtonSubclassProc, 1, 0);
     const UINT selectionIds[] = {ID_CLIP_CUT, ID_CLIP_COPY, ID_CLIP_PASTE, ID_RENAME, ID_DELETE, ID_MORE, ID_EXTRACT_ALL};
     static const wchar_t* selectionLabels[] = {L"Cut", L"Copy", L"Paste", L"Rename", L"Move to Recycle Bin", L"More", L"Extract all"};
     for (size_t i = 0; i < g_app.selectionButtons.size(); ++i) {
         g_app.selectionButtons[i] = CreateOwnerButton(window, selectionIds[i], selectionLabels[i]);
-        SetWindowSubclass(g_app.selectionButtons[i], ToolbarButtonSubclassProc, 1, 0);
     }
     UpdateDualPaneButton();
     const UINT menuIds[] = {ID_MENU_FILE, ID_MENU_EDIT, ID_MENU_VIEW, ID_MENU_HELP};
@@ -5541,10 +5636,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
             if (source != pane.list) continue;
             POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            bool itemMenu = ListView_GetSelectedCount(pane.list) > 0;
             if (point.x == -1 && point.y == -1) {
                 int item = ListView_GetNextItem(pane.list, -1, LVNI_FOCUSED);
                 RECT itemRect{};
                 if (item >= 0 && ListView_GetItemRect(pane.list, item, &itemRect, LVIR_BOUNDS)) {
+                    if (!itemMenu) {
+                        ListView_SetItemState(pane.list, item, LVIS_SELECTED | LVIS_FOCUSED,
+                                              LVIS_SELECTED | LVIS_FOCUSED);
+                        itemMenu = true;
+                    }
                     point = {itemRect.left + Scale(24), itemRect.bottom};
                     ClientToScreen(pane.list, &point);
                 } else {
@@ -5552,7 +5653,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                     point = {listRect.left + Scale(16), listRect.top + Scale(16)};
                 }
             }
-            ShowContextMenu(paneIndex, point);
+            if (itemMenu) ShowContextMenu(paneIndex, point);
+            else ShowBackgroundContextMenu(paneIndex, point);
             return 0;
         }
         break;
