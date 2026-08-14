@@ -6,6 +6,7 @@
 #include <array>
 #include <cwctype>
 #include <memory>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -61,19 +62,30 @@ bool AllowedHost(const std::wstring& host) {
 bool ParseHttpsUrl(const std::wstring& url, std::wstring& host, std::wstring& path, INTERNET_PORT& port) {
     URL_COMPONENTSW parts{sizeof(parts)};
     parts.dwHostNameLength = static_cast<DWORD>(-1); parts.dwUrlPathLength = static_cast<DWORD>(-1);
-    parts.dwExtraInfoLength = static_cast<DWORD>(-1);
+    parts.dwExtraInfoLength = static_cast<DWORD>(-1); parts.dwUserNameLength = static_cast<DWORD>(-1);
+    parts.dwPasswordLength = static_cast<DWORD>(-1);
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts) || parts.nScheme != INTERNET_SCHEME_HTTPS) return false;
+    if (parts.dwUserNameLength || parts.dwPasswordLength) return false;
     host.assign(parts.lpszHostName, parts.dwHostNameLength);
     path.assign(parts.lpszUrlPath, parts.dwUrlPathLength);
     if (parts.dwExtraInfoLength) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
     port = parts.nPort;
-    return AllowedHost(host) && !path.empty();
+    return port == INTERNET_DEFAULT_HTTPS_PORT && AllowedHost(host) && !path.empty();
 }
 
 bool HttpGet(const std::wstring& initialUrl, DWORD maximumBytes, std::vector<BYTE>& output, std::wstring& detail) {
     InternetHandle session(WinHttpOpen(L"Files4Me/" FILES4ME_VERSION_DISPLAY_W L" update checker", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session) { detail = L"WinHTTP initialization failed"; return false; }
+    DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    if (!WinHttpSetOption(session.get(), WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols))) {
+        detail = L"TLS policy initialization failed"; return false;
+    }
+    DWORD rejectCredentials = TRUE;
+    if (!WinHttpSetOption(session.get(), WINHTTP_OPTION_REJECT_USERPWD_IN_URL,
+                          &rejectCredentials, sizeof(rejectCredentials))) {
+        detail = L"URL security policy initialization failed"; return false;
+    }
     WinHttpSetTimeouts(session.get(), 5000, 5000, 10000, 15000);
     std::wstring url = initialUrl;
     for (int redirect = 0; redirect <= 5; ++redirect) {
@@ -180,13 +192,15 @@ std::wstring Utf8(const std::vector<BYTE>& bytes) {
 
 bool ParseManifest(const std::vector<BYTE>& bytes, UpdateManifest& manifest) {
     const std::wstring text = Utf8(bytes); if (text.empty()) return false;
-    std::wstring schema; size_t position = 0;
+    manifest = {};
+    std::wstring schema; std::set<std::wstring> keys; size_t position = 0;
     while (position <= text.size()) {
         const size_t end = text.find(L'\n', position); std::wstring line = text.substr(position, end - position);
         if (!line.empty() && line.back() == L'\r') line.pop_back();
         if (!line.empty() && line.front() != L'#') {
             const size_t equals = line.find(L'='); if (equals == std::wstring::npos) return false;
             const std::wstring key = line.substr(0, equals), value = line.substr(equals + 1);
+            if (key.empty() || !keys.insert(key).second) return false;
             if (key == L"schema") schema = value; else if (key == L"version") manifest.version = value;
             else if (key == L"display_version") manifest.displayVersion = value;
             else if (key == L"installer_url") manifest.installerUrl = value;
@@ -200,26 +214,64 @@ bool ParseManifest(const std::vector<BYTE>& bytes, UpdateManifest& manifest) {
         }
         if (end == std::wstring::npos) break; position = end + 1;
     }
+    const auto asciiAlphaNumeric = [](wchar_t character) {
+        return (character >= L'0' && character <= L'9') || (character >= L'A' && character <= L'Z') ||
+               (character >= L'a' && character <= L'z');
+    };
+    const bool safeDisplayVersion = !manifest.displayVersion.empty() && manifest.displayVersion.size() <= 64 &&
+        asciiAlphaNumeric(manifest.displayVersion.front()) && asciiAlphaNumeric(manifest.displayVersion.back()) &&
+        std::all_of(manifest.displayVersion.begin(), manifest.displayVersion.end(), [&](wchar_t character) {
+            return asciiAlphaNumeric(character) || character == L'.' || character == L'-' || character == L'_';
+        });
+    const bool validDigest = manifest.sha256.size() == 64 &&
+        std::all_of(manifest.sha256.begin(), manifest.sha256.end(), [](wchar_t character) {
+            return (character >= L'0' && character <= L'9') || (character >= L'A' && character <= L'F') ||
+                   (character >= L'a' && character <= L'f');
+        });
+    const bool validNotes = !manifest.notes.empty() && manifest.notes.size() <= 2048 &&
+        std::all_of(manifest.notes.begin(), manifest.notes.end(), [](wchar_t character) { return character >= 0x20; });
     std::wstring host, path; INTERNET_PORT port = 0;
-    return schema == L"1" && !manifest.version.empty() && !manifest.displayVersion.empty() &&
-           manifest.sha256.size() == 64 && manifest.size > 0 && manifest.size <= kMaximumInstallerSize &&
+    return keys.size() == 8 && schema == L"1" && !manifest.version.empty() && safeDisplayVersion &&
+           validDigest && validNotes && manifest.size > 0 && manifest.size <= kMaximumInstallerSize &&
            ParseHttpsUrl(manifest.installerUrl, host, path, port) && ParseHttpsUrl(manifest.releaseUrl, host, path, port);
 }
 
 struct Version { std::array<unsigned,3> numbers{}; std::vector<std::wstring> prerelease; bool valid = false; };
 Version ParseVersion(const std::wstring& text) {
-    Version version; const size_t dash = text.find(L'-'); const std::wstring core = text.substr(0, dash);
+    Version version;
+    if (text.empty() || text.find(L'+') != std::wstring::npos) return version;
+    const auto asciiDigit = [](wchar_t character) { return character >= L'0' && character <= L'9'; };
+    const auto prereleaseCharacter = [&](wchar_t character) {
+        return asciiDigit(character) || (character >= L'A' && character <= L'Z') ||
+               (character >= L'a' && character <= L'z') || character == L'-';
+    };
+    const size_t dash = text.find(L'-');
+    if (dash == 0 || dash + 1 == text.size()) return version;
+    const std::wstring core = text.substr(0, dash);
     size_t start = 0;
     for (size_t index = 0; index < 3; ++index) {
         const size_t dot = core.find(L'.', start); const std::wstring part = core.substr(start, dot - start);
-        if (part.empty() || !std::all_of(part.begin(), part.end(), iswdigit)) return version;
-        unsigned long number = wcstoul(part.c_str(), nullptr, 10); if (number > UINT_MAX) return version;
-        version.numbers[index] = static_cast<unsigned>(number);
-        if (index < 2 && dot == std::wstring::npos) return version; start = dot + 1;
+        if (part.empty() || (part.size() > 1 && part.front() == L'0') ||
+            !std::all_of(part.begin(), part.end(), asciiDigit)) return version;
+        unsigned number = 0;
+        for (wchar_t character : part) {
+            const unsigned digit = static_cast<unsigned>(character - L'0');
+            if (number > (UINT_MAX - digit) / 10) return version;
+            number = number * 10 + digit;
+        }
+        version.numbers[index] = number;
+        if ((index < 2 && dot == std::wstring::npos) || (index == 2 && dot != std::wstring::npos)) return version;
+        if (dot != std::wstring::npos) start = dot + 1;
     }
     if (dash != std::wstring::npos) {
         start = dash + 1;
-        while (start <= text.size()) { const size_t dot = text.find(L'.', start); const std::wstring part = text.substr(start, dot - start); if (part.empty()) return version; version.prerelease.push_back(part); if (dot == std::wstring::npos) break; start = dot + 1; }
+        while (start <= text.size()) {
+            const size_t dot = text.find(L'.', start); const std::wstring part = text.substr(start, dot - start);
+            if (part.empty() || !std::all_of(part.begin(), part.end(), prereleaseCharacter)) return version;
+            const bool numeric = std::all_of(part.begin(), part.end(), asciiDigit);
+            if (numeric && part.size() > 1 && part.front() == L'0') return version;
+            version.prerelease.push_back(part); if (dot == std::wstring::npos) break; start = dot + 1;
+        }
     }
     version.valid = true; return version;
 }
@@ -228,11 +280,16 @@ int CompareVersions(const std::wstring& leftText, const std::wstring& rightText)
     if (left.numbers != right.numbers) return left.numbers < right.numbers ? -1 : 1;
     if (left.prerelease.empty() != right.prerelease.empty()) return left.prerelease.empty() ? 1 : -1;
     for (size_t i = 0; i < (std::min)(left.prerelease.size(), right.prerelease.size()); ++i) {
-        const bool leftNumber = std::all_of(left.prerelease[i].begin(), left.prerelease[i].end(), iswdigit);
-        const bool rightNumber = std::all_of(right.prerelease[i].begin(), right.prerelease[i].end(), iswdigit);
-        if (leftNumber && rightNumber) { const auto l = wcstoull(left.prerelease[i].c_str(), nullptr, 10), r = wcstoull(right.prerelease[i].c_str(), nullptr, 10); if (l != r) return l < r ? -1 : 1; }
+        const auto asciiDigit = [](wchar_t character) { return character >= L'0' && character <= L'9'; };
+        const bool leftNumber = std::all_of(left.prerelease[i].begin(), left.prerelease[i].end(), asciiDigit);
+        const bool rightNumber = std::all_of(right.prerelease[i].begin(), right.prerelease[i].end(), asciiDigit);
+        if (leftNumber && rightNumber) {
+            if (left.prerelease[i].size() != right.prerelease[i].size())
+                return left.prerelease[i].size() < right.prerelease[i].size() ? -1 : 1;
+            const int compared = left.prerelease[i].compare(right.prerelease[i]); if (compared) return compared < 0 ? -1 : 1;
+        }
         else if (leftNumber != rightNumber) return leftNumber ? -1 : 1;
-        else { const int compared = _wcsicmp(left.prerelease[i].c_str(), right.prerelease[i].c_str()); if (compared) return compared < 0 ? -1 : 1; }
+        else { const int compared = left.prerelease[i].compare(right.prerelease[i]); if (compared) return compared < 0 ? -1 : 1; }
     }
     return left.prerelease.size() == right.prerelease.size() ? 0 : (left.prerelease.size() < right.prerelease.size() ? -1 : 1);
 }

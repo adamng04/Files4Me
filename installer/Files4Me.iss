@@ -1,9 +1,9 @@
 #define AppName "Files4Me"
 #ifndef AppVersion
-#define AppVersion "0.6-alpha"
+#define AppVersion "1.0-release"
 #endif
 #ifndef AppNumericVersion
-#define AppNumericVersion "0.6.0.0"
+#define AppNumericVersion "1.0.0.0"
 #endif
 #define AppExeName "Files4Me.exe"
 

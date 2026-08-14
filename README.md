@@ -37,9 +37,9 @@ Installed builds keep preferences and the operation journal under `%LocalAppData
 
 ## Updates
 
-Installed builds can check the signed preview channel once per day or through **Help > Check for updates**. Files4Me downloads only HTTPS resources from the official `adamng04/Files4Me` GitHub repository, verifies an RSA-signed manifest and the installer's SHA-256 digest, and asks before downloading or launching Setup. Portable builds only open the GitHub release page.
+Installed builds can check their explicitly compiled update channel once per day or through **Help > Check for updates**. Alpha builds use `updates/alpha`; stable builds use `updates/stable`. Files4Me downloads only HTTPS resources from the official `adamng04/Files4Me` GitHub repository, verifies an RSA-signed manifest and the installer's SHA-256 digest, and asks before downloading or launching Setup. Portable builds only open the GitHub release page.
 
-Release maintainers generate `updates/alpha/manifest.ini` and its detached signature with `tools/sign-update.ps1`. The signer opens the non-exportable RSA-3072 key named `Files4Me Update Manifest Signing v1` from the current user's Microsoft Software Key Storage Provider and requires Windows strong-key approval for every signature. It refuses keys with the wrong provider, size, export policy, UI policy, or pinned public-key fingerprint.
+Release maintainers generate the selected channel's `manifest.ini` and detached signature with `tools/sign-update.ps1 -Channel alpha` or `-Channel stable`; the channel argument is mandatory to prevent accidental cross-channel publication. The signer opens the non-exportable RSA-3072 key named `Files4Me Update Manifest Signing v1` from the current user's Microsoft Software Key Storage Provider and requires Windows strong-key approval for every signature. It refuses keys with the wrong provider, size, export policy, UI policy, or pinned public-key fingerprint.
 
 Before the first CNG signing operation, migrate the original legacy key with `tools/manage-update-key.ps1`. Migration creates and verifies two independently salted password-encrypted PKCS#8 backups on different volumes, using PBES2, AES-256-CBC, PBKDF2-HMAC-SHA256, and 600,000 iterations. The original key is never deleted automatically.
 
@@ -61,7 +61,7 @@ Google Material Icons are embedded in the executable for offline use and distrib
 
 Selected files support native Windows OLE drag-and-drop to the other pane, folders, Explorer, the desktop, and compatible applications. Right-click uses the full Windows Shell context menu, including installed shell extensions.
 
-Files4Me 0.6 restores the Windows Shell folder-background context menu, adds pin/unpin commands for folder items and the current directory, and keeps file clipboard operations scoped to the active pane. Release artifacts are `Files4Me-0.6-alpha-portable.exe` and `Files4Me-0.6-alpha-Setup.exe`; this build is not advertised through the installed-build update manifest.
+Files4Me 1.0 is the first stable release. It uses the stable signed-update channel, while the same 1.0 installer may be advertised once on the alpha channel to migrate existing preview installations. The release artifact is `Files4Me-1.0-release-Setup.exe`.
 
 Downloads uses an Explorer-style date timeline (Today, Yesterday, this week, and older groups). ZIP files open as read-only folders using Windows' built-in compressed-folder handler; files can be opened, copied, dragged out, or extracted without bundling an archive library. Checkbox space is reserved in Details view so names never overlap selection controls.
 

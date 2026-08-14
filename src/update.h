@@ -27,7 +27,7 @@ struct UpdateResult {
 
 constexpr wchar_t Files4MeCurrentVersion[] = FILES4ME_VERSION_SEMVER_W;
 constexpr wchar_t Files4MeUpdateManifestUrl[] =
-    L"https://raw.githubusercontent.com/adamng04/Files4Me/main/updates/alpha/manifest.ini";
+    L"https://raw.githubusercontent.com/adamng04/Files4Me/main/updates/" FILES4ME_UPDATE_CHANNEL_W L"/manifest.ini";
 
 void BeginUpdateCheck(HWND target, UINT completionMessage, bool manual);
 void BeginUpdateDownload(HWND target, UINT completionMessage, const UpdateManifest& manifest,

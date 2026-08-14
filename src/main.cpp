@@ -92,7 +92,7 @@ enum class PaneMode { Filesystem, DriveOverview, RecycleBin, Archive };
 enum class NewTemplateKind { Empty, TemplateFile, Data, Command };
 enum class SidebarAction { Navigate, ShellOpen, Separator };
 enum class JobKind : uint32_t { Copy, Move, Recycle, DeletePermanent, Rename, NewFolder };
-enum class JobState : uint32_t { Queued, Running, Paused, Cancelling, Completed, Failed, Interrupted };
+enum class JobState : uint32_t { Queued, Running, Paused, Cancelling, Completed, Failed, Interrupted, Canceled };
 enum class ConflictPolicy : uint32_t { Ask, Replace, KeepBoth, Skip };
 
 class UniqueKernelHandle {
@@ -136,6 +136,7 @@ struct OperationJob {
     std::atomic_uint progressDone{0};
     std::atomic_bool pauseRequested{false};
     std::atomic_bool cancelRequested{false};
+    std::atomic_bool started{false};
     std::mutex controlMutex;
     std::condition_variable controlChanged;
     std::mutex textMutex;
@@ -384,6 +385,7 @@ struct AppState {
     std::mutex associationIconMutex;
     std::vector<std::pair<std::wstring, int>> associationIcons;
     std::array<ComPtr<IImageList>, 3> iconSources{};
+    ComPtr<IImageList> smallIconSource;
     std::array<IconCache, 3> iconCaches{};
     IconCache smallIconCache{};
     ThemeMode theme = ThemeMode::Dark;
@@ -1377,28 +1379,39 @@ bool IsPathWordCharacter(wchar_t character) {
     return iswalnum(character) != 0 || character == L'_';
 }
 
+bool IsEditControl(HWND window) {
+    if (!window) return false;
+    wchar_t className[32]{};
+    return GetClassNameW(window, className, ARRAYSIZE(className)) > 0 &&
+           _wcsicmp(className, WC_EDITW) == 0;
+}
+
+void DeleteEditWord(HWND window, bool backward) {
+    if (!IsEditControl(window)) return;
+    DWORD selectionStart = 0, selectionEnd = 0;
+    SendMessageW(window, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart),
+                 reinterpret_cast<LPARAM>(&selectionEnd));
+    if (selectionStart == selectionEnd) {
+        const int length = GetWindowTextLengthW(window);
+        std::wstring value(static_cast<size_t>(length) + 1, L'\0');
+        GetWindowTextW(window, value.data(), length + 1);
+        value.resize(length);
+        selectionStart = (std::min)(selectionStart, static_cast<DWORD>(value.size()));
+        selectionEnd = selectionStart;
+        if (backward) {
+            while (selectionStart > 0 && !IsPathWordCharacter(value[selectionStart - 1])) --selectionStart;
+            while (selectionStart > 0 && IsPathWordCharacter(value[selectionStart - 1])) --selectionStart;
+        } else {
+            while (selectionEnd < value.size() && IsPathWordCharacter(value[selectionEnd])) ++selectionEnd;
+            while (selectionEnd < value.size() && !IsPathWordCharacter(value[selectionEnd])) ++selectionEnd;
+        }
+    }
+    SendMessageW(window, EM_SETSEL, selectionStart, selectionEnd);
+    SendMessageW(window, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
+}
+
 LRESULT CALLBACK PathEditSubclassProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
                                       UINT_PTR, DWORD_PTR) {
-    if (message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
-        (wParam == VK_BACK || wParam == VK_DELETE)) {
-        DWORD selectionStart = 0, selectionEnd = 0;
-        SendMessageW(window, EM_GETSEL, reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
-        if (selectionStart == selectionEnd) {
-            const int length = GetWindowTextLengthW(window);
-            std::wstring text(static_cast<size_t>(length) + 1, L'\0');
-            GetWindowTextW(window, text.data(), length + 1); text.resize(length);
-            if (wParam == VK_BACK) {
-                while (selectionStart > 0 && !IsPathWordCharacter(text[selectionStart - 1])) --selectionStart;
-                while (selectionStart > 0 && IsPathWordCharacter(text[selectionStart - 1])) --selectionStart;
-            } else {
-                while (selectionEnd < static_cast<DWORD>(text.size()) && IsPathWordCharacter(text[selectionEnd])) ++selectionEnd;
-                while (selectionEnd < static_cast<DWORD>(text.size()) && !IsPathWordCharacter(text[selectionEnd])) ++selectionEnd;
-            }
-            SendMessageW(window, EM_SETSEL, selectionStart, selectionEnd);
-        }
-        SendMessageW(window, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(L""));
-        return 0;
-    }
     if (message == WM_CHAR && wParam == 0x7F) return 0;
     if (message == WM_NCDESTROY) RemoveWindowSubclass(window, PathEditSubclassProc, 3);
     return DefSubclassProc(window, message, wParam, lParam);
@@ -1898,7 +1911,7 @@ void RunOperationWorker(std::shared_ptr<OperationJob> job) {
     HRESULT result = SUCCEEDED(initialized) ? ExecuteOperationJob(job) : initialized;
     if (SUCCEEDED(initialized)) CoUninitialize();
     job->result = result;
-    if (job->cancelRequested || result == HRESULT_FROM_WIN32(ERROR_CANCELLED) || result == E_ABORT) job->state = JobState::Failed;
+    if (job->cancelRequested || result == HRESULT_FROM_WIN32(ERROR_CANCELLED) || result == E_ABORT) job->state = JobState::Canceled;
     else job->state = SUCCEEDED(result) ? JobState::Completed : JobState::Failed;
     auto* completed = new (std::nothrow) std::shared_ptr<OperationJob>(job);
     if (completed && !PostMessageW(g_app.window, WM_APP_JOB_DONE, 0, reinterpret_cast<LPARAM>(completed))) delete completed;
@@ -1915,6 +1928,7 @@ void PumpOperationQueue() {
             for (const auto& root : job->resourceKeys) if (g_app.operations.activeRoots.contains(root)) { blocked = true; break; }
             if (blocked) continue;
             job->state = JobState::Running;
+            job->started = true;
             for (const auto& root : job->resourceKeys) g_app.operations.activeRoots.insert(root);
             ++g_app.operations.activeCount; starting.push_back(job);
         }
@@ -2363,6 +2377,48 @@ void ReplaceCommandPlaceholder(std::wstring& command, const std::wstring& token,
     }
 }
 
+std::wstring ResolveShellNewExecutable(const std::wstring& command) {
+    int argumentCount = 0;
+    LPWSTR* arguments = CommandLineToArgvW(command.c_str(), &argumentCount);
+    if (!arguments || argumentCount < 1 || !arguments[0][0]) {
+        if (arguments) LocalFree(arguments);
+        return {};
+    }
+    std::wstring executable = arguments[0];
+    LocalFree(arguments);
+
+    const bool driveAbsolute = executable.size() >= 3 && iswalpha(executable[0]) &&
+                               executable[1] == L':' && (executable[2] == L'\\' || executable[2] == L'/');
+    const bool uncAbsolute = PathIsUNCW(executable.c_str()) != FALSE || executable.rfind(L"\\\\?\\", 0) == 0;
+    if (driveAbsolute || uncAbsolute) {
+        std::vector<wchar_t> fullPath(32768);
+        const DWORD length = GetFullPathNameW(executable.c_str(), static_cast<DWORD>(fullPath.size()),
+                                               fullPath.data(), nullptr);
+        if (!length || length >= fullPath.size()) return {};
+        executable.assign(fullPath.data(), length);
+    } else {
+        // Registry ShellNew commands normally contain an absolute executable.
+        // For a bare system command, search only trusted application/Windows
+        // locations; never search the destination directory or current folder.
+        if (executable.find_first_of(L"\\/:") != std::wstring::npos) return {};
+        wchar_t systemDirectory[32768]{}, windowsDirectory[32768]{};
+        const UINT systemLength = GetSystemDirectoryW(systemDirectory, ARRAYSIZE(systemDirectory));
+        const UINT windowsLength = GetWindowsDirectoryW(windowsDirectory, ARRAYSIZE(windowsDirectory));
+        if (!systemLength || systemLength >= ARRAYSIZE(systemDirectory) ||
+            !windowsLength || windowsLength >= ARRAYSIZE(windowsDirectory)) return {};
+        const std::wstring safeSearchPath = ExecutableDirectory() + L";" + systemDirectory + L";" + windowsDirectory;
+        std::vector<wchar_t> resolved(32768);
+        const wchar_t* extension = PathFindExtensionW(executable.c_str());
+        const DWORD length = SearchPathW(safeSearchPath.c_str(), executable.c_str(),
+                                         extension && *extension ? nullptr : L".exe",
+                                         static_cast<DWORD>(resolved.size()), resolved.data(), nullptr);
+        if (!length || length >= resolved.size()) return {};
+        executable.assign(resolved.data(), length);
+    }
+    const DWORD attributes = GetFileAttributesW(executable.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY) ? executable : std::wstring{};
+}
+
 HRESULT CreateNewItemOnWorker(const NewItemTemplate& item, const std::wstring& target) {
     if (item.kind == NewTemplateKind::TemplateFile)
         return CopyFileW(item.source.c_str(), target.c_str(), TRUE) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
@@ -2374,8 +2430,10 @@ HRESULT CreateNewItemOnWorker(const NewItemTemplate& item, const std::wstring& t
         ReplaceCommandPlaceholder(command, L"%1", quotedTarget); ReplaceCommandPlaceholder(command, L"%L", quotedTarget);
         ReplaceCommandPlaceholder(command, L"%l", quotedTarget);
         if (!hadPlaceholder) command += L" " + quotedTarget;
+        const std::wstring executable = ResolveShellNewExecutable(command);
+        if (executable.empty()) return HRESULT_FROM_WIN32(ERROR_BAD_EXE_FORMAT);
         STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
-        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+        if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
                             ParentPath(target).c_str(), &startup, &process)) return HRESULT_FROM_WIN32(GetLastError());
         UniqueKernelHandle processHandle(process.hProcess), threadHandle(process.hThread);
         for (int attempt = 0; attempt < 50; ++attempt) {
@@ -2623,7 +2681,7 @@ void EnsureColumnWidths(Pane& pane, int width) {
         if (recycle) {
             pane.columnWidths = {width * 28 / 100, width * 35 / 100, width * 23 / 100, width - width * 86 / 100};
         } else {
-            pane.columnWidths = {width * 45 / 100, width * 14 / 100, width * 16 / 100, width - width * 75 / 100};
+            pane.columnWidths = {width * 64 / 100, width * 9 / 100, width * 10 / 100, width - width * 83 / 100};
         }
         pane.columnLayoutMode = pane.mode;
     } else if (width != pane.columnLayoutWidth) {
@@ -2809,6 +2867,41 @@ int AddFolderImage(HIMAGELIST images, int pixels) {
     return index;
 }
 
+int AddPaddedIcon(HIMAGELIST images, HICON source, int cellPixels, int iconPixels) {
+    if (!images || !source || cellPixels <= 0 || iconPixels <= 0) return -1;
+    HDC memory = CreateCompatibleDC(nullptr);
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = cellPixels;
+    bitmapInfo.bmiHeader.biHeight = -cellPixels;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    DWORD* pixels = nullptr;
+    HBITMAP bitmap = CreateDIBSection(memory, &bitmapInfo, DIB_RGB_COLORS,
+                                      reinterpret_cast<void**>(&pixels), nullptr, 0);
+    if (!bitmap || !pixels) { if (bitmap) DeleteObject(bitmap); DeleteDC(memory); return -1; }
+    std::fill_n(pixels, static_cast<size_t>(cellPixels) * cellPixels, 0);
+    HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
+    const int bounded = (std::min)(iconPixels, cellPixels);
+    DrawIconEx(memory, (cellPixels - bounded) / 2, (cellPixels - bounded) / 2,
+               source, bounded, bounded, 0, nullptr, DI_NORMAL);
+    SelectObject(memory, oldBitmap);
+    for (size_t pixel = 0, count = static_cast<size_t>(cellPixels) * cellPixels; pixel < count; ++pixel)
+        if ((pixels[pixel] & 0xFF000000) == 0 && (pixels[pixel] & 0x00FFFFFF) != 0) pixels[pixel] |= 0xFF000000;
+    const int maskStride = ((cellPixels + 15) / 16) * 2;
+    std::vector<BYTE> mask(static_cast<size_t>(maskStride) * cellPixels, 0);
+    HBITMAP maskBitmap = CreateBitmap(cellPixels, cellPixels, 1, 1, mask.data());
+    ICONINFO iconInfo{};
+    iconInfo.fIcon = TRUE; iconInfo.hbmColor = bitmap; iconInfo.hbmMask = maskBitmap;
+    HICON padded = maskBitmap ? CreateIconIndirect(&iconInfo) : nullptr;
+    const int result = padded ? ImageList_AddIcon(images, padded) : -1;
+    if (padded) DestroyIcon(padded);
+    if (maskBitmap) DeleteObject(maskBitmap);
+    DeleteObject(bitmap); DeleteDC(memory);
+    return result;
+}
+
 void RebuildIconCaches() {
     const int sourceSizes[] = {SHIL_JUMBO, SHIL_JUMBO, SHIL_EXTRALARGE};
     for (size_t index = 0; index < g_app.iconSources.size(); ++index) {
@@ -2816,6 +2909,10 @@ void RebuildIconCaches() {
         SHGetImageList(sourceSizes[index], IID_IImageList,
                        reinterpret_cast<void**>(g_app.iconSources[index].GetAddressOf()));
     }
+    g_app.smallIconSource.Reset();
+    const int smallSourceSize = g_app.dpi >= 192 ? SHIL_JUMBO : g_app.dpi >= 144 ? SHIL_EXTRALARGE : SHIL_LARGE;
+    SHGetImageList(smallSourceSize, IID_IImageList,
+                   reinterpret_cast<void**>(g_app.smallIconSource.GetAddressOf()));
     const int logicalSizes[] = {128, 72, 48};
     for (size_t index = 0; index < g_app.iconCaches.size(); ++index) {
         IconCache& cache = g_app.iconCaches[index];
@@ -2828,7 +2925,7 @@ void RebuildIconCaches() {
     }
     IconCache& smallCache = g_app.smallIconCache;
     if (smallCache.images) ImageList_Destroy(smallCache.images);
-    smallCache.pixels = (std::max)(Scale(26), GetSystemMetricsForDpi(SM_CXSMICON, g_app.dpi) + Scale(6));
+    smallCache.pixels = Scale(32);
     smallCache.images = ImageList_Create(smallCache.pixels, smallCache.pixels, ILC_COLOR32 | ILC_MASK, 32, 32);
     if (smallCache.images) ImageList_SetBkColor(smallCache.images, CLR_NONE);
     smallCache.folderIndex = AddFolderImage(smallCache.images, smallCache.pixels);
@@ -2838,7 +2935,7 @@ void RebuildIconCaches() {
 void RebuildSidebarIconCache() {
     if (g_app.sidebarImages) ImageList_Destroy(g_app.sidebarImages);
     const int iconPixels = GetSystemMetricsForDpi(SM_CXSMICON, g_app.dpi);
-    const int rowPixels = (std::max)(Scale(24), iconPixels + Scale(4));
+    const int rowPixels = (std::max)(Scale(28), iconPixels + Scale(8));
     g_app.sidebarImages = ImageList_Create(rowPixels, rowPixels, ILC_COLOR32 | ILC_MASK, 24, 16);
     if (g_app.sidebarImages) ImageList_SetBkColor(g_app.sidebarImages, CLR_NONE);
     g_app.sidebarIconIndexes.clear();
@@ -2994,10 +3091,16 @@ int CachedSmallIconIndex(int systemIndex, bool directory = false) {
     IconCache& cache = g_app.smallIconCache;
     if (directory && cache.folderIndex >= 0) return cache.folderIndex;
     for (const auto& entry : cache.indexes) if (entry.first == systemIndex) return entry.second;
-    if (!cache.images || !g_app.systemImages) return systemIndex;
-    HICON icon = ImageList_GetIcon(g_app.systemImages, systemIndex, ILD_TRANSPARENT);
+    if (!cache.images) return systemIndex;
+    HICON icon = nullptr;
+    if (g_app.smallIconSource)
+        g_app.smallIconSource->GetIcon(systemIndex, ILD_TRANSPARENT, &icon);
+    if (!icon && g_app.systemImagesLarge)
+        icon = ImageList_GetIcon(g_app.systemImagesLarge, systemIndex, ILD_TRANSPARENT);
+    if (!icon && g_app.systemImages)
+        icon = ImageList_GetIcon(g_app.systemImages, systemIndex, ILD_TRANSPARENT);
     if (!icon) return cache.folderIndex >= 0 ? cache.folderIndex : 0;
-    const int added = ImageList_AddIcon(cache.images, icon);
+    const int added = AddPaddedIcon(cache.images, icon, cache.pixels, Scale(24));
     DestroyIcon(icon);
     if (added < 0) return cache.folderIndex >= 0 ? cache.folderIndex : 0;
     cache.indexes.emplace_back(systemIndex, added);
@@ -3106,8 +3209,17 @@ const wchar_t* JobStateText(JobState state) {
     case JobState::Queued: return L"Queued"; case JobState::Running: return L"Running";
     case JobState::Paused: return L"Paused"; case JobState::Cancelling: return L"Cancelling";
     case JobState::Completed: return L"Completed"; case JobState::Failed: return L"Failed";
-    default: return L"Interrupted";
+    case JobState::Canceled: return L"Canceled"; default: return L"Interrupted";
     }
+}
+
+bool IsTerminalJobState(JobState state) {
+    return state == JobState::Completed || state == JobState::Canceled ||
+           state == JobState::Failed || state == JobState::Interrupted;
+}
+
+bool IsCancellableJobState(JobState state) {
+    return state == JobState::Queued || state == JobState::Running || state == JobState::Paused;
 }
 
 int OperationDrawerHeight() {
@@ -3127,17 +3239,30 @@ std::shared_ptr<OperationJob> PrimaryOperationJob() {
 
 void UpdateOperationButtons() {
     auto job = PrimaryOperationJob();
-    const bool visible = job != nullptr;
-    for (HWND button : g_app.operationButtons) if (button) ShowWindow(button, visible ? SW_SHOW : SW_HIDE);
+    const auto jobs = JobSnapshot();
+    const bool cancellable = std::any_of(jobs.begin(), jobs.end(), [](const auto& candidate) {
+        return IsCancellableJobState(candidate->state);
+    });
+    const bool clearable = std::any_of(jobs.begin(), jobs.end(), [](const auto& candidate) {
+        return IsTerminalJobState(candidate->state);
+    });
+    for (HWND button : g_app.operationButtons) if (button) ShowWindow(button, SW_HIDE);
     if (!job) return;
     const JobState state = job->state;
     const wchar_t* primary = state == JobState::Paused ? L"Resume" :
                              (state == JobState::Failed || state == JobState::Interrupted) ? L"Retry" : L"Pause";
     SetWindowTextW(g_app.operationButtons[0], primary);
-    EnableWindow(g_app.operationButtons[0], state != JobState::Completed && state != JobState::Cancelling);
-    EnableWindow(g_app.operationButtons[1], state == JobState::Running || state == JobState::Paused || state == JobState::Queued);
-    ShowWindow(g_app.operationButtons[0], state == JobState::Completed ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_app.operationButtons[1], state == JobState::Completed ? SW_HIDE : SW_SHOW);
+    SetWindowTextW(g_app.operationButtons[1], L"Cancel all");
+    SetWindowTextW(g_app.operationButtons[2], L"Clear");
+    const bool primaryAction = state == JobState::Running || state == JobState::Paused ||
+                               state == JobState::Queued || state == JobState::Failed ||
+                               state == JobState::Interrupted;
+    EnableWindow(g_app.operationButtons[0], primaryAction && !g_app.closingAfterOperations);
+    EnableWindow(g_app.operationButtons[1], cancellable && !g_app.closingAfterOperations);
+    EnableWindow(g_app.operationButtons[2], clearable && !g_app.closingAfterOperations);
+    ShowWindow(g_app.operationButtons[0], primaryAction ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.operationButtons[1], cancellable ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.operationButtons[2], clearable ? SW_SHOW : SW_HIDE);
 }
 
 void LayoutWindow() {
@@ -3237,7 +3362,7 @@ void LayoutWindow() {
         const int drawerTop = client.bottom - Scale(30) - drawerHeight;
         int buttonRight = client.right - contentInset - Scale(10);
         const int buttonY = drawerTop + Scale(13);
-        const int widths[] = {78, 76, 70};
+        const int widths[] = {78, 92, 70};
         for (int i = 2; i >= 0; --i) {
             const int width = Scale(widths[i]);
             MoveWindow(g_app.operationButtons[i], buttonRight - width, buttonY, width, Scale(34), TRUE);
@@ -3836,6 +3961,7 @@ HWND AddSettingsButton(HWND parent, UINT id, const wchar_t* text, int x, int y, 
     HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         Scale(x), Scale(y), Scale(width), Scale(height), parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)), g_app.instance, nullptr);
     ApplyFont(control, id >= ID_SETTINGS_CATEGORY_BASE && id < ID_SETTINGS_CATEGORY_BASE + 8);
+    SendMessageW(control, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
     if (category >= 0) g_app.settingsControls.push_back({control, category});
     return control;
 }
@@ -4060,7 +4186,10 @@ void SaveJobJournal() {
     const ULONGLONG now = CurrentFileTimeValue();
     constexpr ULONGLONG thirtyDays = 30ULL * 24 * 60 * 60 * 10000000;
     std::erase_if(jobs, [&](const auto& job) {
-        return job->state == JobState::Completed && job->created && now > job->created && now - job->created > thirtyDays;
+        const JobState state = job->state;
+        const bool terminal = state == JobState::Completed || state == JobState::Canceled ||
+                              state == JobState::Failed || state == JobState::Interrupted;
+        return terminal && job->created && now > job->created && now - job->created > thirtyDays;
     });
     if (jobs.size() > 100) jobs.erase(jobs.begin(), jobs.end() - 100);
     std::vector<BYTE> data;
@@ -4117,6 +4246,9 @@ void LoadJobJournal() {
             !ReadJournalValue(data, offset, conflict) || !ReadJournalValue(data, offset, result) || !ReadJournalValue(data, offset, job->created) ||
             !ReadJournalString(data, offset, job->destination) || !ReadJournalString(data, offset, job->newName) ||
             !ReadJournalValue(data, offset, sourceCount) || sourceCount > 4096) return;
+        if (kind > static_cast<uint32_t>(JobKind::NewFolder) ||
+            state > static_cast<uint32_t>(JobState::Canceled) ||
+            conflict > static_cast<uint32_t>(ConflictPolicy::Skip)) return;
         job->kind = static_cast<JobKind>(kind); job->state = static_cast<JobState>(state); job->conflict = static_cast<ConflictPolicy>(conflict); job->result = result;
         for (uint32_t source = 0; source < sourceCount; ++source) { std::wstring path; if (!ReadJournalString(data, offset, path)) return; job->sources.push_back(std::move(path)); }
         if (job->state == JobState::Running || job->state == JobState::Paused || job->state == JobState::Cancelling) job->state = JobState::Interrupted;
@@ -4302,6 +4434,7 @@ HWND CreateOwnerButton(HWND parent, UINT id, const wchar_t* text) {
     HWND button = CreateWindowExW(0, WC_BUTTONW, text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                                   0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)), g_app.instance, nullptr);
     ApplyFont(button);
+    SendMessageW(button, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
     SetWindowSubclass(button, ToolbarButtonSubclassProc, 1, 0);
     return button;
 }
@@ -4885,30 +5018,37 @@ void PauseResumeRetryPrimaryJob() {
     const JobState state = job->state;
     if (state == JobState::Running) job->pauseRequested = true;
     else if (state == JobState::Paused) {
-        if (job->pauseRequested) { job->pauseRequested = false; job->controlChanged.notify_all(); }
+        if (job->started) { job->pauseRequested = false; job->controlChanged.notify_all(); }
         else job->state = JobState::Queued;
     } else if (state == JobState::Queued) job->state = JobState::Paused;
     else if (state == JobState::Failed || state == JobState::Interrupted) {
         job->cancelRequested = false; job->pauseRequested = false; job->result = S_OK;
-        job->progressDone = 0; job->progressTotal = 0; job->state = JobState::Queued; PumpOperationQueue();
+        job->started = false; job->progressDone = 0; job->progressTotal = 0; job->state = JobState::Queued; PumpOperationQueue();
     }
     SaveJobJournal(); LayoutWindow();
 }
 
-void CancelPrimaryJob() {
-    auto job = PrimaryOperationJob(); if (!job) return;
-    if (job->state == JobState::Queued || (job->state == JobState::Paused && !job->pauseRequested)) {
-        job->result = HRESULT_FROM_WIN32(ERROR_CANCELLED); job->state = JobState::Failed;
-    } else {
-        job->state = JobState::Cancelling; job->cancelRequested = true; job->pauseRequested = false; job->controlChanged.notify_all();
+void CancelAllJobs() {
+    const auto jobs = JobSnapshot();
+    for (const auto& job : jobs) {
+        const JobState state = job->state;
+        if (state == JobState::Queued || (state == JobState::Paused && !job->started)) {
+            job->result = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+            job->state = JobState::Canceled;
+        } else if (state == JobState::Running || state == JobState::Paused) {
+            job->cancelRequested = true;
+            job->pauseRequested = false;
+            job->state = JobState::Cancelling;
+            job->controlChanged.notify_all();
+        }
     }
     SaveJobJournal(); LayoutWindow();
 }
 
-void ClearCompletedJobs() {
+void ClearTerminalJobs() {
     {
         std::lock_guard lock(g_app.operations.mutex);
-        std::erase_if(g_app.operations.jobs, [](const auto& job) { return job->state == JobState::Completed; });
+        std::erase_if(g_app.operations.jobs, [](const auto& job) { return IsTerminalJobState(job->state); });
     }
     SaveJobJournal(); LayoutWindow();
 }
@@ -4929,6 +5069,7 @@ void BeginPendingRename(Pane& pane) {
 }
 
 void ExecuteCommand(UINT id) {
+    if (g_app.closingAfterOperations && id != ID_EXIT) return;
     Pane& active = g_app.panes[g_app.activePane];
     if (id >= ID_NEW_TEMPLATE_BASE && id <= ID_NEW_TEMPLATE_LAST) {
         CreateNewFromTemplate(id); return;
@@ -5045,8 +5186,8 @@ void ExecuteCommand(UINT id) {
     case ID_SETTINGS: ShowSettingsWindow(); break;
     case ID_CHECK_UPDATES: StartUpdateCheck(true); break;
     case ID_JOB_PAUSE: PauseResumeRetryPrimaryJob(); break;
-    case ID_JOB_CANCEL: CancelPrimaryJob(); break;
-    case ID_JOB_CLEAR: ClearCompletedJobs(); break;
+    case ID_JOB_CANCEL: CancelAllJobs(); break;
+    case ID_JOB_CLEAR: ClearTerminalJobs(); break;
     case ID_PREF_SIDEBAR_VISIBLE: ApplyPreferenceCommand(ID_PREF_SIDEBAR_VISIBLE); break;
     case ID_MENU_FILE: case ID_MENU_EDIT: case ID_MENU_VIEW: case ID_MENU_HELP: ShowAppMenu(id); break;
     case ID_EXIT: SendMessageW(g_app.window, WM_CLOSE, 0, 0); break;
@@ -5086,6 +5227,7 @@ LRESULT HandleNotify(NMHDR* header) {
             auto* custom = reinterpret_cast<NMLVCUSTOMDRAW*>(header);
             if (custom->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
             if (custom->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                custom->nmcd.uItemState &= ~CDIS_FOCUS;
                 const int item = static_cast<int>(custom->nmcd.dwItemSpec);
                 if (item >= 0 && item < static_cast<int>(g_app.sidebarItems.size()) &&
                     g_app.sidebarItems[item].action == SidebarAction::Separator) {
@@ -5249,6 +5391,10 @@ LRESULT HandleNotify(NMHDR* header) {
         if (custom->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
         if (custom->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
             const int itemIndex = static_cast<int>(custom->nmcd.dwItemSpec);
+            // We track the hovered row ourselves so every report subitem gets
+            // the same neutral fill.  Leaving CDIS_HOT set lets Explorer's
+            // theme paint only the subitem under the pointer blue.
+            custom->nmcd.uItemState &= ~(CDIS_HOT | CDIS_FOCUS);
             if (custom->iSubItem == 0 && itemIndex >= 0 && itemIndex < static_cast<int>(pane.items.size()) &&
                 pane.items[itemIndex].IsActionable() && pane.view == FileViewMode::Details) {
                 const FileItem& item = pane.items[itemIndex];
@@ -5263,6 +5409,11 @@ LRESULT HandleNotify(NMHDR* header) {
                 HBRUSH background = CreateSolidBrush(selected ? FileRowSelectionColor() :
                                                      (hovered ? g_app.colors.buttonPressed : g_app.colors.surface));
                 FillRect(custom->nmcd.hdc, &cell, background); DeleteObject(background);
+                HPEN divider = CreatePen(PS_SOLID, 1, g_app.colors.border);
+                HGDIOBJ previousPen = SelectObject(custom->nmcd.hdc, divider);
+                MoveToEx(custom->nmcd.hdc, cell.right - 1, cell.top, nullptr);
+                LineTo(custom->nmcd.hdc, cell.right - 1, cell.bottom);
+                SelectObject(custom->nmcd.hdc, previousPen); DeleteObject(divider);
                 const int checkboxSize = (std::max)(Scale(18), 16);
                 const bool showCheckbox = g_app.checkboxImages && (selected || pane.hoveredCheckboxItem == itemIndex);
                 if (showCheckbox) ImageList_Draw(g_app.checkboxImages, selected ? 2 : 1, custom->nmcd.hdc,
@@ -5283,20 +5434,34 @@ LRESULT HandleNotify(NMHDR* header) {
                 RestoreDC(custom->nmcd.hdc, savedDc);
                 return CDRF_SKIPDEFAULT;
             }
+            const bool selectedSubitem = itemIndex >= 0 &&
+                (ListView_GetItemState(pane.list, itemIndex, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+            const bool hoveredSubitem = pane.hoveredCheckboxItem == itemIndex;
             if (custom->iSubItem > 0 && itemIndex >= 0 && itemIndex < static_cast<int>(pane.items.size()) &&
-                pane.items[itemIndex].IsActionable() && pane.view == FileViewMode::Details &&
-                (ListView_GetItemState(pane.list, itemIndex, LVIS_SELECTED) & LVIS_SELECTED) != 0) {
+                pane.items[itemIndex].IsActionable() && pane.view == FileViewMode::Details) {
                 const FileItem& item = pane.items[itemIndex];
                 RECT cell = custom->nmcd.rc;
-                HBRUSH background = CreateSolidBrush(FileRowSelectionColor());
+                HBRUSH background = CreateSolidBrush(selectedSubitem ? FileRowSelectionColor()
+                                                     : (hoveredSubitem ? g_app.colors.buttonPressed
+                                                                       : g_app.colors.surface));
                 FillRect(custom->nmcd.hdc, &cell, background); DeleteObject(background);
+                HPEN divider = CreatePen(PS_SOLID, 1, g_app.colors.border);
+                HGDIOBJ previousPen = SelectObject(custom->nmcd.hdc, divider);
+                MoveToEx(custom->nmcd.hdc, cell.right - 1, cell.top, nullptr);
+                LineTo(custom->nmcd.hdc, cell.right - 1, cell.bottom);
+                SelectObject(custom->nmcd.hdc, previousPen); DeleteObject(divider);
                 std::wstring text;
                 if (custom->iSubItem == 1) text = g_app.preferences.showExtensions ? item.extension : L"";
                 else if (custom->iSubItem == 2) text = item.IsDirectory() ? L"" : FormatSize(item.size);
                 else if (custom->iSubItem == 3) text = FormatTime(item.modified);
-                cell.left += Scale(7); cell.right -= Scale(7);
+                // NM_CUSTOMDRAW reports a subitem rectangle whose left edge is
+                // one physical pixel past the origin used by the native report
+                // text painter. Compensate for that border pixel so hover does
+                // not move left-aligned text horizontally.
+                cell.left += (std::max)(0, Scale(6) - 1); cell.right -= Scale(6);
                 SetBkMode(custom->nmcd.hdc, TRANSPARENT);
-                SetTextColor(custom->nmcd.hdc, IsCutPath(item.fullPath) ? g_app.colors.muted : FileRowSelectionTextColor());
+                SetTextColor(custom->nmcd.hdc, IsCutPath(item.fullPath) ? g_app.colors.muted :
+                             (selectedSubitem ? FileRowSelectionTextColor() : g_app.colors.text));
                 SelectObject(custom->nmcd.hdc, g_app.fileFont ? g_app.fileFont : g_app.font);
                 DrawTextW(custom->nmcd.hdc, text.c_str(), -1, &cell,
                           (custom->iSubItem == 2 ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -5306,6 +5471,7 @@ LRESULT HandleNotify(NMHDR* header) {
         }
         if (custom->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
             const int itemIndex = static_cast<int>(custom->nmcd.dwItemSpec);
+            custom->nmcd.uItemState &= ~(CDIS_HOT | CDIS_FOCUS);
             const bool selected = (ListView_GetItemState(pane.list, itemIndex, LVIS_SELECTED) & LVIS_SELECTED) != 0;
             const bool hovered = pane.hoveredCheckboxItem == itemIndex;
             if (itemIndex >= 0 && itemIndex < static_cast<int>(pane.items.size()) && pane.items[itemIndex].timelineHeader) {
@@ -5454,6 +5620,7 @@ void CreateSidebar(HWND parent) {
         0, 0, 0, 0, parent, reinterpret_cast<HMENU>(ID_SIDEBAR), g_app.instance, nullptr);
     ApplyFont(g_app.sidebar);
     ListView_SetExtendedListViewStyle(g_app.sidebar, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SendMessageW(g_app.sidebar, WM_CHANGEUISTATE, MAKEWPARAM(UIS_SET, UISF_HIDEFOCUS), 0);
     ListView_SetImageList(g_app.sidebar, g_app.sidebarImages, LVSIL_SMALL);
     SetWindowSubclass(g_app.sidebar, SidebarScrollSubclassProc, 5, 0);
     LVCOLUMNW column{};
@@ -5493,7 +5660,7 @@ void CreateUi(HWND window) {
     const wchar_t* menuLabels[] = {L"&File", L"&Edit", L"&View", L"&Help"};
     for (size_t i = 0; i < g_app.menuButtons.size(); ++i) g_app.menuButtons[i] = CreateOwnerButton(window, menuIds[i], menuLabels[i]);
     const UINT operationIds[] = {ID_JOB_PAUSE, ID_JOB_CANCEL, ID_JOB_CLEAR};
-    const wchar_t* operationLabels[] = {L"Pause", L"Cancel", L"Clear"};
+    const wchar_t* operationLabels[] = {L"Pause", L"Cancel all", L"Clear"};
     for (size_t i = 0; i < g_app.operationButtons.size(); ++i) {
         g_app.operationButtons[i] = CreateOwnerButton(window, operationIds[i], operationLabels[i]);
         ShowWindow(g_app.operationButtons[i], SW_HIDE);
@@ -5876,20 +6043,31 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         return 0;
     }
+    case WM_QUERYENDSESSION:
+        SaveSettings(); SaveJobJournal();
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wParam) {
+            g_app.closingAfterOperations = true;
+            CancelAllJobs();
+            SaveSettings(); SaveJobJournal();
+        }
+        return 0;
     case WM_CLOSE: {
-        size_t active = 0;
-        { std::lock_guard lock(g_app.operations.mutex); active = g_app.operations.activeCount; }
-        if (active && !g_app.closingAfterOperations) {
-            if (MessageBoxW(window, L"File operations are active. Cancel them and exit when safe?", kAppName,
+        const auto jobs = JobSnapshot();
+        const bool pending = std::any_of(jobs.begin(), jobs.end(), [](const auto& job) {
+            const JobState state = job->state;
+            return IsCancellableJobState(state) || state == JobState::Cancelling;
+        });
+        if (pending && !g_app.closingAfterOperations) {
+            if (MessageBoxW(window, L"File operations are active. Cancel all operations and exit when safe?", kAppName,
                             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return 0;
             g_app.closingAfterOperations = true;
-            const auto jobs = JobSnapshot();
-            for (const auto& job : jobs) {
-                if (job->state == JobState::Running || job->state == JobState::Paused || job->state == JobState::Cancelling) {
-                    job->cancelRequested = true; job->pauseRequested = false; job->state = JobState::Cancelling; job->controlChanged.notify_all();
-                } else if (job->state == JobState::Queued) { job->result = HRESULT_FROM_WIN32(ERROR_CANCELLED); job->state = JobState::Failed; }
-            }
-            SaveJobJournal(); LayoutWindow(); return 0;
+            CancelAllJobs();
+            size_t active = 0;
+            { std::lock_guard lock(g_app.operations.mutex); active = g_app.operations.activeCount; }
+            if (active == 0) PostMessageW(window, WM_CLOSE, 0, 0);
+            return 0;
         }
         SaveSettings(); SaveJobJournal(); DestroyWindow(window); return 0;
     }
@@ -6019,16 +6197,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
                         SetWindowTextW(pane.search, L"");
                         SetFocus(pane.list);
                         bypassAccelerators = true;
-                    } else if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && message.wParam != 'L') {
-                        bypassAccelerators = true;
                     }
                     break;
                 }
             }
-            if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 &&
-                (message.wParam == VK_BACK || message.wParam == VK_DELETE)) {
-                for (const Pane& pane : g_app.panes)
-                    if (focus == pane.path || focus == pane.search) { bypassAccelerators = true; break; }
+            const bool controlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (controlDown && IsEditControl(focus)) {
+                if (message.wParam == 'A') {
+                    SendMessageW(focus, EM_SETSEL, 0, -1);
+                    continue;
+                }
+                if (message.wParam == VK_BACK || message.wParam == VK_DELETE) {
+                    DeleteEditWord(focus, message.wParam == VK_BACK);
+                    continue;
+                }
+                if (message.wParam == 'C' || message.wParam == 'X' || message.wParam == 'V' ||
+                    message.wParam == 'Z') bypassAccelerators = true;
             }
             if (g_app.layoutPopup && IsWindow(g_app.layoutPopup) &&
                 (focus == g_app.layoutPopup || IsChild(g_app.layoutPopup, focus))) {
