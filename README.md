@@ -37,7 +37,19 @@ Installed builds keep preferences and the operation journal under `%LocalAppData
 
 Installed builds can check the signed preview channel once per day or through **Help > Check for updates**. Files4Me downloads only HTTPS resources from the official `adamng04/Files4Me` GitHub repository, verifies an RSA-signed manifest and the installer's SHA-256 digest, and asks before downloading or launching Setup. Portable builds only open the GitHub release page.
 
-Release maintainers generate `updates/alpha/manifest.ini` and its detached signature with `tools/sign-update.ps1`. The RSA private key must remain outside the repository and be backed up securely. Installers belong in GitHub Releases, not Git history.
+Release maintainers generate `updates/alpha/manifest.ini` and its detached signature with `tools/sign-update.ps1`. The signer opens the non-exportable RSA-3072 key named `Files4Me Update Manifest Signing v1` from the current user's Microsoft Software Key Storage Provider and requires Windows strong-key approval for every signature. It refuses keys with the wrong provider, size, export policy, UI policy, or pinned public-key fingerprint.
+
+Before the first CNG signing operation, migrate the original legacy key with `tools/manage-update-key.ps1`. Migration creates and verifies two independently salted password-encrypted PKCS#8 backups on different volumes, using PBES2, AES-256-CBC, PBKDF2-HMAC-SHA256, and 600,000 iterations. The original key is never deleted automatically.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\manage-update-key.ps1 `
+  -Action Migrate `
+  -BackupPath 'E:\Files4Me\Files4Me-update-recovery-A.pem','F:\Files4Me\Files4Me-update-recovery-B.pem'
+
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\manage-update-key.ps1 -Action Audit
+```
+
+Use two offline removable volumes and store the backup passphrase separately in a password manager. Test backups with `-Action TestBackup`. On a replacement Windows account or PC, use `-Action Restore` with one backup. TPM storage is not assumed: test the specific Platform Crypto Provider first; if it cannot import the existing identity, ship a dual-trust updater release before rotating to a newly generated TPM key. Installers belong in GitHub Releases, not Git history.
 
 ## License
 

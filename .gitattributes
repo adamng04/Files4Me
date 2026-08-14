@@ -1,2 +1,5 @@
 updates/** text eol=lf
 tools/sign-update.ps1 text eol=crlf
+tools/manage-update-key.ps1 text eol=crlf
+tools/Files4Me.ReleaseSigning.psm1 text eol=crlf
+tests/release_signing_smoke.ps1 text eol=crlf

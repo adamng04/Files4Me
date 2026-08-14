@@ -4,14 +4,14 @@ param(
     [Parameter(Mandatory=$true)][string]$DisplayVersion,
     [Parameter(Mandatory=$true)][string]$Tag,
     [Parameter(Mandatory=$true)][string]$Notes,
-    [string]$PrivateKey = (Join-Path $env:USERPROFILE 'Documents\Files4Me-update-private.key'),
+    [string]$KeyName = 'Files4Me Update Manifest Signing v1',
     [string]$OutputDirectory = 'updates\alpha'
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'Files4Me.ReleaseSigning.psm1') -Force
 $root = Split-Path -Parent $PSScriptRoot
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
-$keyPath = (Resolve-Path -LiteralPath $PrivateKey).Path
 $outputPath = Join-Path $root $OutputDirectory
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
 
@@ -36,23 +36,9 @@ $manifest += "`n"
 $utf8 = [Text.UTF8Encoding]::new($false)
 $manifestBytes = $utf8.GetBytes($manifest)
 
-$csp = [System.Security.Cryptography.CspParameters]::new()
-$csp.ProviderType = 24
-$rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new($csp)
-$rsa.PersistKeyInCsp = $false
-try {
-    $rsa.ImportCspBlob([IO.File]::ReadAllBytes($keyPath))
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try { $digest = $sha.ComputeHash($manifestBytes) } finally { $sha.Dispose() }
-    $signature = $rsa.SignHash($digest, [System.Security.Cryptography.CryptoConfig]::MapNameToOID('SHA256'))
-    if (-not $rsa.VerifyHash($digest, [System.Security.Cryptography.CryptoConfig]::MapNameToOID('SHA256'), $signature)) {
-        throw 'Generated update signature failed self-verification.'
-    }
-}
-finally {
-    $rsa.Clear()
-    $rsa.Dispose()
-}
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try { $digest = $sha.ComputeHash($manifestBytes) } finally { $sha.Dispose() }
+$signature = Invoke-Files4MeReleaseSignature -Digest $digest -KeyName $KeyName
 
 $manifestPath = Join-Path $outputPath 'manifest.ini'
 $signaturePath = Join-Path $outputPath 'manifest.ini.sig'
