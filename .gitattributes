@@ -1,0 +1,2 @@
+updates/** text eol=lf
+tools/sign-update.ps1 text eol=crlf

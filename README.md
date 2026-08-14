@@ -33,6 +33,12 @@ Run `powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1` wit
 
 Installed builds keep preferences and the operation journal under `%LocalAppData%\Files4Me`, separate from program files.
 
+## Updates
+
+Installed builds can check the signed preview channel once per day or through **Help > Check for updates**. Files4Me downloads only HTTPS resources from the official `adamng04/Files4Me` GitHub repository, verifies an RSA-signed manifest and the installer's SHA-256 digest, and asks before downloading or launching Setup. Portable builds only open the GitHub release page.
+
+Release maintainers generate `updates/alpha/manifest.ini` and its detached signature with `tools/sign-update.ps1`. The RSA private key must remain outside the repository and be backed up securely. Installers belong in GitHub Releases, not Git history.
+
 ## License
 
 Files4Me is licensed under the [MIT License](LICENSE). Google Material Icons remain available under the Apache License 2.0; see `assets/MATERIAL-ICONS-LICENSE.txt`.

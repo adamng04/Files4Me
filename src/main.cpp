@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 #include "archive.h"
 #include "resource.h"
+#include "update.h"
 
 #include <algorithm>
 #include <array>
@@ -52,13 +53,14 @@ constexpr UINT WM_APP_DRIVES_DONE = WM_APP + 4;
 constexpr UINT WM_APP_ARCHIVE_DONE = WM_APP + 5;
 constexpr UINT WM_APP_ARCHIVE_EXTRACT_DONE = WM_APP + 6;
 constexpr UINT WM_APP_NEW_ITEM_DONE = WM_APP + 7;
+constexpr UINT WM_APP_UPDATE_DONE = WM_APP + 8;
 
 enum CommandId : UINT {
     ID_BACK = 100, ID_FORWARD, ID_UP, ID_REFRESH, ID_NEW_FOLDER,
     ID_LIGHT, ID_DARK, ID_DUAL, ID_SWITCH_PANE,
     ID_OPEN, ID_RENAME, ID_COPY, ID_MOVE, ID_DELETE, ID_DELETE_PERMANENT,
     ID_NEW_TAB, ID_CLOSE_TAB, ID_FOCUS_PATH, ID_SELECT_ALL, ID_CLIP_COPY, ID_CLIP_CUT, ID_CLIP_PASTE,
-    ID_MENU_FILE, ID_MENU_EDIT, ID_MENU_VIEW, ID_MENU_HELP, ID_EXIT, ID_ABOUT, ID_SHORTCUTS,
+    ID_MENU_FILE, ID_MENU_EDIT, ID_MENU_VIEW, ID_MENU_HELP, ID_EXIT, ID_ABOUT, ID_SHORTCUTS, ID_CHECK_UPDATES,
     ID_SETTINGS, ID_THEME_TOGGLE, ID_VIEW_LAYOUT, ID_JOB_PAUSE, ID_JOB_CANCEL, ID_JOB_CLEAR,
     ID_MORE, ID_OPEN_WITH, ID_COPY_PATH, ID_PROPERTIES, ID_SHELL_CONTEXT, ID_EXTRACT_ALL = 0x9001,
     ID_CREATE_FOLDER = 0x9002, ID_CREATE_TEXT = 0x9003,
@@ -79,7 +81,7 @@ enum CommandId : UINT {
     ID_PREF_DIRS_FIRST, ID_PREF_EXTENSIONS, ID_PREF_CONTEXT_MENU, ID_PREF_DRAG_MOVE,
     ID_PREF_AUTO_REFRESH, ID_PREF_REFRESH_SPEED, ID_PREF_SIDEBAR_VISIBLE,
     ID_PREF_GALLERY, ID_PREF_RECYCLE, ID_PREF_NETWORK, ID_PREF_LINUX,
-    ID_PREF_THEME_LIGHT, ID_PREF_THEME_DARK, ID_PREF_DUAL
+    ID_PREF_THEME_LIGHT, ID_PREF_THEME_DARK, ID_PREF_DUAL, ID_PREF_AUTO_UPDATES
 };
 
 enum class ThemeMode { Light, Dark };
@@ -166,6 +168,7 @@ struct Preferences {
     bool autoRefresh = true;
     bool shellContextMenu = true;
     bool dragMoveSameDrive = true;
+    bool automaticUpdates = true;
     UINT refreshMilliseconds = 1500;
 };
 
@@ -387,6 +390,8 @@ struct AppState {
     UINT dpi = 96;
     std::wstring iniPath;
     std::wstring jobsPath;
+    std::wstring stateDirectory;
+    std::atomic_bool updateChecking{false};
     OperationManager operations;
     std::set<std::wstring> cutPaths;
     ComPtr<IContextMenu2> activeContextMenu2;
@@ -415,6 +420,7 @@ std::wstring ArchiveExtractedPath(const std::wstring& destination, const std::ws
 void ShowLayoutFlyout();
 void ShowNewMenu();
 void CreateNewFromTemplate(UINT command);
+void StartUpdateCheck(bool manual);
 void ShowBackgroundContextMenu(int paneIndex, POINT point);
 void PrepareThemedMenu(HMENU menu);
 UINT TrackModernPopupMenu(HMENU menu, UINT flags, int x, int y, HWND owner, LPTPMPARAMS parameters = nullptr);
@@ -3301,6 +3307,7 @@ wchar_t MaterialGlyph(UINT id) {
     case ID_SELECT_ALL: return L'\ue834';
     case ID_ABOUT: return L'\ue88e';
     case ID_SHORTCUTS: return L'\ue312';
+    case ID_CHECK_UPDATES: return L'\ue863';
     default: return 0;
     }
 }
@@ -3325,6 +3332,7 @@ bool IsPreferenceOn(UINT id) {
     case ID_PREF_THEME_LIGHT: return g_app.theme == ThemeMode::Light;
     case ID_PREF_THEME_DARK: return g_app.theme == ThemeMode::Dark;
     case ID_PREF_DUAL: return g_app.dualPane;
+    case ID_PREF_AUTO_UPDATES: return g_app.preferences.automaticUpdates;
     default: return false;
     }
 }
@@ -3396,10 +3404,10 @@ void DrawOwnerControl(const DRAWITEMSTRUCT* draw) {
     const bool toolbarButton = std::find(g_app.commandButtons.begin(), g_app.commandButtons.end(), draw->hwndItem) != g_app.commandButtons.end() ||
                                std::find(g_app.selectionButtons.begin(), g_app.selectionButtons.end(), draw->hwndItem) != g_app.selectionButtons.end();
     const bool columnHeader = IsColumnHeader(draw->CtlID);
-    const bool settingsCategoryButton = draw->CtlID >= ID_SETTINGS_CATEGORY_BASE && draw->CtlID < ID_SETTINGS_CATEGORY_BASE + 7;
-    const bool preferenceButton = draw->CtlID >= ID_PREF_RESTORE && draw->CtlID <= ID_PREF_DUAL;
-    const bool selectedTheme = (draw->CtlID >= ID_PREF_RESTORE && draw->CtlID <= ID_PREF_DUAL && IsPreferenceOn(draw->CtlID)) ||
-                               (draw->CtlID >= ID_SETTINGS_CATEGORY_BASE && draw->CtlID < ID_SETTINGS_CATEGORY_BASE + 7 &&
+    const bool settingsCategoryButton = draw->CtlID >= ID_SETTINGS_CATEGORY_BASE && draw->CtlID < ID_SETTINGS_CATEGORY_BASE + 8;
+    const bool preferenceButton = (draw->CtlID >= ID_PREF_RESTORE && draw->CtlID <= ID_PREF_DUAL) || draw->CtlID == ID_PREF_AUTO_UPDATES;
+    const bool selectedTheme = (((draw->CtlID >= ID_PREF_RESTORE && draw->CtlID <= ID_PREF_DUAL) || draw->CtlID == ID_PREF_AUTO_UPDATES) && IsPreferenceOn(draw->CtlID)) ||
+                               (draw->CtlID >= ID_SETTINGS_CATEGORY_BASE && draw->CtlID < ID_SETTINGS_CATEGORY_BASE + 8 &&
                                 static_cast<int>(draw->CtlID - ID_SETTINGS_CATEGORY_BASE) == g_app.settingsCategory) ||
                                (IsViewCommand(draw->CtlID) && CommandFromViewMode(g_app.panes[g_app.activePane].view) == draw->CtlID);
     const bool pressed = (draw->itemState & ODS_SELECTED) != 0;
@@ -3696,11 +3704,11 @@ LRESULT CALLBACK ToolbarButtonSubclassProc(HWND window, UINT message, WPARAM wPa
 }
 
 void ShowSettingsCategory(int category) {
-    g_app.settingsCategory = (std::max)(0, (std::min)(category, 6));
+    g_app.settingsCategory = (std::max)(0, (std::min)(category, 7));
     for (const SettingsControl& control : g_app.settingsControls)
         ShowWindow(control.window, control.category == g_app.settingsCategory ? SW_SHOW : SW_HIDE);
     if (g_app.settingsWindow) InvalidateRect(g_app.settingsWindow, nullptr, TRUE);
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 8; ++i) {
         HWND button = GetDlgItem(g_app.settingsWindow, ID_SETTINGS_CATEGORY_BASE + i);
         if (button) InvalidateRect(button, nullptr, TRUE);
     }
@@ -3715,7 +3723,8 @@ void UpdateSettingsLabels() {
         {ID_PREF_AUTO_REFRESH, L"Watch folders for changes"}, {ID_PREF_SIDEBAR_VISIBLE, L"Show navigation sidebar"},
         {ID_PREF_GALLERY, L"Show Gallery"}, {ID_PREF_RECYCLE, L"Show Recycle Bin"},
         {ID_PREF_NETWORK, L"Show Network"}, {ID_PREF_LINUX, L"Show Linux / WSL"},
-        {ID_PREF_THEME_LIGHT, L"Light mode"}, {ID_PREF_THEME_DARK, L"Dark mode"}, {ID_PREF_DUAL, L"Dual-pane layout"}
+        {ID_PREF_THEME_LIGHT, L"Light mode"}, {ID_PREF_THEME_DARK, L"Dark mode"}, {ID_PREF_DUAL, L"Dual-pane layout"},
+        {ID_PREF_AUTO_UPDATES, L"Check automatically once per day"}
     };
     for (const auto& toggle : toggles) {
         HWND control = GetDlgItem(g_app.settingsWindow, toggle.id);
@@ -3736,7 +3745,7 @@ void UpdateSettingsLabels() {
 HWND AddSettingsButton(HWND parent, UINT id, const wchar_t* text, int x, int y, int width, int height, int category = -1) {
     HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
         Scale(x), Scale(y), Scale(width), Scale(height), parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)), g_app.instance, nullptr);
-    ApplyFont(control, id >= ID_SETTINGS_CATEGORY_BASE && id < ID_SETTINGS_CATEGORY_BASE + 7);
+    ApplyFont(control, id >= ID_SETTINGS_CATEGORY_BASE && id < ID_SETTINGS_CATEGORY_BASE + 8);
     if (category >= 0) g_app.settingsControls.push_back({control, category});
     return control;
 }
@@ -3777,6 +3786,7 @@ void ApplyPreferenceCommand(UINT id) {
     case ID_PREF_THEME_LIGHT: g_app.theme = ThemeMode::Light; ApplyTheme(); break;
     case ID_PREF_THEME_DARK: g_app.theme = ThemeMode::Dark; ApplyTheme(); break;
     case ID_PREF_DUAL: g_app.dualPane = !g_app.dualPane; UpdateDualPaneButton(); LayoutWindow(); break;
+    case ID_PREF_AUTO_UPDATES: g_app.preferences.automaticUpdates = !g_app.preferences.automaticUpdates; break;
     }
     UpdateSettingsLabels(); SaveSettings();
 }
@@ -3785,10 +3795,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     switch (message) {
     case WM_CREATE: {
         g_app.settingsWindow = window; g_app.settingsControls.clear();
-        const wchar_t* categories[] = {L"General", L"Appearance", L"Files", L"Operations", L"Navigation", L"Sidebar", L"Advanced"};
-        for (int i = 0; i < 7; ++i) AddSettingsButton(window, ID_SETTINGS_CATEGORY_BASE + i, categories[i], 16, 74 + i * 42, 172, 36);
+        const wchar_t* categories[] = {L"General", L"Appearance", L"Files", L"Operations", L"Navigation", L"Sidebar", L"Advanced", L"Updates"};
+        for (int i = 0; i < 8; ++i) AddSettingsButton(window, ID_SETTINGS_CATEGORY_BASE + i, categories[i], 16, 70 + i * 39, 172, 34);
         const struct { int category; const wchar_t* title; } titles[] = {
-            {0,L"General"},{1,L"Appearance"},{2,L"File display"},{3,L"File operations"},{4,L"Navigation and refresh"},{5,L"Windows shortcuts"},{6,L"Advanced"}};
+            {0,L"General"},{1,L"Appearance"},{2,L"File display"},{3,L"File operations"},{4,L"Navigation and refresh"},{5,L"Windows shortcuts"},{6,L"Advanced"},{7,L"Updates"}};
         for (const auto& title : titles) AddSettingsText(window, title.title, 220, 72, 500, 30, title.category, true);
         AddSettingsButton(window, ID_PREF_RESTORE, L"", 220, 114, 500, 42, 0);
         AddSettingsButton(window, ID_PREF_CONFIRM_DELETE, L"", 220, 164, 500, 42, 0);
@@ -3811,12 +3821,17 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         AddSettingsButton(window, ID_PREF_NETWORK, L"", 220, 214, 242, 42, 5);
         AddSettingsButton(window, ID_PREF_LINUX, L"", 478, 214, 242, 42, 5);
         AddSettingsText(window, L"Files4Me uses native Unicode paths, long-path aware APIs, Windows shell icons, the Recycle Bin, clipboard file transfer, drag and drop, keyboard shortcuts, and a portable INI file. No plug-ins or shell code is loaded unless the full context-menu option is enabled.", 220, 114, 500, 170, 6);
+        AddSettingsButton(window, ID_PREF_AUTO_UPDATES, L"", 220, 114, 500, 42, 7);
+        AddSettingsButton(window, ID_CHECK_UPDATES, L"Check for updates now", 220, 164, 500, 42, 7);
+        AddSettingsText(window, L"Preview channel · signed manifests · GitHub Releases", 220, 222, 500, 40, 7);
         UpdateSettingsLabels(); ShowSettingsCategory(g_app.settingsCategory); ApplyTheme(); return 0;
     }
     case WM_COMMAND: {
         const UINT id = LOWORD(wParam);
-        if (id >= ID_SETTINGS_CATEGORY_BASE && id < ID_SETTINGS_CATEGORY_BASE + 7) ShowSettingsCategory(id - ID_SETTINGS_CATEGORY_BASE);
+        if (id >= ID_SETTINGS_CATEGORY_BASE && id < ID_SETTINGS_CATEGORY_BASE + 8) ShowSettingsCategory(id - ID_SETTINGS_CATEGORY_BASE);
         else if (id >= ID_PREF_RESTORE && id <= ID_PREF_DUAL) ApplyPreferenceCommand(id);
+        else if (id == ID_PREF_AUTO_UPDATES) ApplyPreferenceCommand(id);
+        else if (id == ID_CHECK_UPDATES) StartUpdateCheck(true);
         return 0;
     }
     case WM_DRAWITEM: DrawOwnerControl(reinterpret_cast<DRAWITEMSTRUCT*>(lParam)); return TRUE;
@@ -4065,6 +4080,7 @@ void SaveSettings() {
     writeBool(L"Navigation", L"AutoRefresh", g_app.preferences.autoRefresh);
     writeBool(L"Operations", L"ShellContextMenu", g_app.preferences.shellContextMenu);
     writeBool(L"Operations", L"DragMoveSameDrive", g_app.preferences.dragMoveSameDrive);
+    writeBool(L"Updates", L"AutomaticChecks", g_app.preferences.automaticUpdates);
     WritePrivateProfileStringW(L"Navigation", L"RefreshMilliseconds",
                                std::to_wstring(g_app.preferences.refreshMilliseconds).c_str(), g_app.iniPath.c_str());
     for (int i = 0; i < 2; ++i) {
@@ -4100,6 +4116,7 @@ void LoadPreferences() {
     g_app.preferences.autoRefresh = readBool(L"Navigation", L"AutoRefresh", true);
     g_app.preferences.shellContextMenu = readBool(L"Operations", L"ShellContextMenu", true);
     g_app.preferences.dragMoveSameDrive = readBool(L"Operations", L"DragMoveSameDrive", true);
+    g_app.preferences.automaticUpdates = readBool(L"Updates", L"AutomaticChecks", true);
     const UINT interval = GetPrivateProfileIntW(L"Navigation", L"RefreshMilliseconds", 1500, g_app.iniPath.c_str());
     g_app.preferences.refreshMilliseconds = interval == 3000 || interval == 5000 ? interval : 1500;
 }
@@ -4108,6 +4125,74 @@ std::wstring ReadSetting(const wchar_t* section, const wchar_t* key, const wchar
     std::array<wchar_t, 32768> buffer{};
     GetPrivateProfileStringW(section, key, fallback, buffer.data(), static_cast<DWORD>(buffer.size()), g_app.iniPath.c_str());
     return buffer.data();
+}
+
+void StartUpdateCheck(bool manual) {
+    if (g_app.updateChecking.exchange(true)) {
+        if (manual) MessageBoxW(g_app.window, L"An update check is already running.", kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (!manual) {
+        wchar_t value[32]{};
+        GetPrivateProfileStringW(L"Updates", L"LastSuccessfulCheck", L"0", value, ARRAYSIZE(value), g_app.iniPath.c_str());
+        const ULONGLONG last = _wcstoui64(value, nullptr, 10), now = CurrentFileTimeValue();
+        constexpr ULONGLONG oneDay = 24ULL * 60 * 60 * 10000000;
+        if (last && now >= last && now - last < oneDay) { g_app.updateChecking = false; return; }
+    }
+    BeginUpdateCheck(g_app.window, WM_APP_UPDATE_DONE, manual);
+}
+
+void OpenTrustedWebPage(const std::wstring& url) {
+    ShellExecuteW(g_app.window, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void HandleUpdateResult(std::unique_ptr<UpdateResult> result) {
+    g_app.updateChecking = false;
+    if (!result) return;
+    if (result->status == UpdateStatus::UpToDate || result->status == UpdateStatus::Available) {
+        WritePrivateProfileStringW(L"Updates", L"LastSuccessfulCheck",
+                                   std::to_wstring(CurrentFileTimeValue()).c_str(), g_app.iniPath.c_str());
+    }
+    if (result->status == UpdateStatus::UpToDate) {
+        if (result->manual) MessageBoxW(g_app.window, L"Files4Me is up to date.", L"Check for updates", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (result->status == UpdateStatus::Available) {
+        std::wstring prompt = L"Files4Me " + result->manifest.displayVersion + L" is available.\n\n" + result->manifest.notes;
+        if (!IsFiles4MeInstalledBuild()) {
+            prompt += L"\n\nThis is a portable copy. Open the GitHub release page?";
+            if (MessageBoxW(g_app.window, prompt.c_str(), L"Files4Me update", MB_YESNO | MB_ICONINFORMATION) == IDYES)
+                OpenTrustedWebPage(result->manifest.releaseUrl);
+            return;
+        }
+        prompt += L"\n\nYes: download and install\nNo: view release page\nCancel: later";
+        const int choice = MessageBoxW(g_app.window, prompt.c_str(), L"Files4Me update", MB_YESNOCANCEL | MB_ICONINFORMATION);
+        if (choice == IDNO) { OpenTrustedWebPage(result->manifest.releaseUrl); return; }
+        if (choice == IDYES) {
+            g_app.updateChecking = true;
+            BeginUpdateDownload(g_app.window, WM_APP_UPDATE_DONE, result->manifest, g_app.stateDirectory);
+        }
+        return;
+    }
+    if (result->status == UpdateStatus::DownloadReady) {
+        size_t active = 0; { std::lock_guard lock(g_app.operations.mutex); active = g_app.operations.activeCount; }
+        if (active) {
+            MessageBoxW(g_app.window, L"The update is verified and ready, but file operations are active. Finish them and check again to install.",
+                        L"Files4Me update", MB_OK | MB_ICONINFORMATION); return;
+        }
+        if (MessageBoxW(g_app.window, L"The update was downloaded and verified. Install it now? Files4Me will close.",
+                        L"Files4Me update", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+            SHELLEXECUTEINFOW execute{sizeof(execute)}; execute.hwnd = g_app.window; execute.lpVerb = L"open";
+            execute.lpFile = result->downloadedPath.c_str(); execute.nShow = SW_SHOWNORMAL;
+            if (ShellExecuteExW(&execute)) PostMessageW(g_app.window, WM_CLOSE, 0, 0);
+            else ShowError(HRESULT_FROM_WIN32(GetLastError()), L"Launch updater");
+        }
+        return;
+    }
+    if (result->manual) {
+        const std::wstring detail = result->detail.empty() ? L"The update check failed." : result->detail;
+        MessageBoxW(g_app.window, detail.c_str(), L"Check for updates", MB_OK | MB_ICONWARNING);
+    }
 }
 
 HWND CreateOwnerButton(HWND parent, UINT id, const wchar_t* text) {
@@ -4590,6 +4675,8 @@ void ShowAppMenu(UINT menuId) {
     } else {
         AppendMenuW(menu, MF_STRING, ID_SHORTCUTS, L"Keyboard shortcuts");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, ID_CHECK_UPDATES, L"Check for updates");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, ID_ABOUT, L"About Files4Me");
     }
     RECT rect{};
@@ -4787,6 +4874,7 @@ void ExecuteCommand(UINT id) {
         break;
     }
     case ID_SETTINGS: ShowSettingsWindow(); break;
+    case ID_CHECK_UPDATES: StartUpdateCheck(true); break;
     case ID_JOB_PAUSE: PauseResumeRetryPrimaryJob(); break;
     case ID_JOB_CANCEL: CancelPrimaryJob(); break;
     case ID_JOB_CLEAR: ClearCompletedJobs(); break;
@@ -5237,6 +5325,7 @@ void CreateUi(HWND window) {
     Navigate(1, g_app.panes[1].tabs[0].path, false);
     SetTimer(window, 1, g_app.preferences.refreshMilliseconds, nullptr);
     PumpOperationQueue();
+    if (g_app.preferences.automaticUpdates) StartUpdateCheck(false);
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -5444,6 +5533,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         DrawTextW(dc, L"Files4Me-0.3-alpha", -1, &versionRect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         EndPaint(window, &paint); return 0;
     }
+    case WM_APP_UPDATE_DONE:
+        HandleUpdateResult(std::unique_ptr<UpdateResult>(reinterpret_cast<UpdateResult*>(lParam)));
+        return 0;
     case WM_APP_NEW_ITEM_DONE: {
         std::unique_ptr<NewItemResult> result(reinterpret_cast<NewItemResult*>(lParam));
         if (!result || result->pane < 0 || result->pane > 1) return 0;
@@ -5636,6 +5728,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         LocalFree(arguments);
     }
     const std::wstring stateDirectory = ResolveStateDirectory();
+    g_app.stateDirectory = stateDirectory;
     g_app.iniPath = JoinPath(stateDirectory, L"Files4Me.ini");
     g_app.jobsPath = JoinPath(stateDirectory, L"Files4Me.jobs");
     LoadPreferences();

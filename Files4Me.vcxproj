@@ -34,15 +34,16 @@
     <Link>
       <MinimalRebuildFromTracking>false</MinimalRebuildFromTracking>
       <SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation><DataExecutionPrevention>true</DataExecutionPrevention><RandomizedBaseAddress>true</RandomizedBaseAddress><HighEntropyVA>true</HighEntropyVA><ControlFlowGuard>Guard</ControlFlowGuard>
-      <AdditionalDependencies>User32.lib;Gdi32.lib;Comctl32.lib;Shell32.lib;Shlwapi.lib;Ole32.lib;Dwmapi.lib;UxTheme.lib;Propsys.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>User32.lib;Gdi32.lib;Comctl32.lib;Shell32.lib;Shlwapi.lib;Ole32.lib;Dwmapi.lib;UxTheme.lib;Propsys.lib;Winhttp.lib;Bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ManifestFile>app.manifest</ManifestFile>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\archive.cpp" />
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\update.cpp" />
   </ItemGroup>
-  <ItemGroup><ClInclude Include="src\archive.h" /></ItemGroup>
+  <ItemGroup><ClInclude Include="src\archive.h" /><ClInclude Include="src\update.h" /></ItemGroup>
   <ItemGroup><ResourceCompile Include="src\Files4Me.rc" /></ItemGroup>
   <ItemGroup><Manifest Include="app.manifest" /></ItemGroup>
   <ItemGroup>

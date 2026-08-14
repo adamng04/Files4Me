@@ -8,6 +8,10 @@ The release build enables ASLR, high-entropy ASLR, DEP/NX, stack cookies, SDL ch
 
 These measures reduce risk but cannot guarantee the absence of vulnerabilities or operating-system zero-days. Keep Windows updated and obtain builds from a trusted source. Report suspected vulnerabilities privately with reproduction steps, affected version, and impact.
 
+## Update trust
+
+The updater accepts only HTTPS resources from the official GitHub and GitHubusercontent hosts. Update metadata is capped at 16 KiB and must carry a valid RSA-3072/SHA-256 signature from the offline Files4Me release key. Installer downloads are size-bounded and must match the signed SHA-256 digest before they can be launched. Automatic network failures stay silent and never block startup.
+
 ## File-system boundaries
 
 - Paths are handled as Unicode strings and support long-path-aware Windows APIs.
